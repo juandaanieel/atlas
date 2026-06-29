@@ -9,10 +9,10 @@ when static analysis cannot prove them.
 
 ## Install
 
-From the repository root:
+Atlas uses Pixi for local development and execution. From the repository root:
 
 ```bash
-pip install -e .
+pixi install
 ```
 
 ## Basic usage
@@ -20,13 +20,13 @@ pip install -e .
 Run Atlas with an explicit folder:
 
 ```bash
-atlas explore --where PATH_TO_FOLDER_TO_EXPLORE
+pixi run atlas explore --where PATH_TO_FOLDER_TO_EXPLORE
 ```
 
 For example:
 
 ```bash
-atlas explore --where ./src
+pixi run atlas explore --where ./src
 ```
 
 Atlas writes its output inside the explored folder:
