@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Atlas Explorer</title>
+    <link rel="stylesheet" href="assets/styles.css?v=__ATLAS_STYLES_VERSION__">
+  </head>
+  <body>
+    <script>
+      window.ATLAS_PAYLOAD = __ATLAS_PAYLOAD__;
+    </script>
+    <div class="shell">
+      <aside class="sidebar">
+        <div id="head" class="head"></div>
+        <div id="tree" class="tree"></div>
+      </aside>
+      <main class="stage">
+        <div class="toolbar">
+          <div id="crumbs" class="crumbs"></div>
+          <div id="tools" class="tools"></div>
+        </div>
+        <svg id="canvas" class="canvas" role="img" aria-label="Scoped code graph"></svg>
+        <div class="hint" id="hint"></div>
+      </main>
+      <div id="detailSplitter" class="detail-splitter" title="Resize details"></div>
+      <aside id="detail" class="detail-panel"></aside>
+    </div>
+    <script src="assets/src/app.js?v=__ATLAS_APP_VERSION__"></script>
+  </body>
+</html>

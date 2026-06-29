@@ -1,0 +1,1 @@
+"""Class fixture package."""

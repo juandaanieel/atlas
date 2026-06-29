@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas"
+version = "0.2.0"
+description = "A local, file-first Python package explorer."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Atlas" }]
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+atlas = "atlas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+atlas = ["explorer/static/**/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+norecursedirs = ["tests/fixtures"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11"
+pytest = ">=8.0"
+
+[tool.pixi.pypi-dependencies]
+atlas = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+test = "python -B -m pytest"
+explore = "python -B -m atlas explore --where ."
+smoke = "python -B -m atlas explore --where tests/fixtures/simple_package"
