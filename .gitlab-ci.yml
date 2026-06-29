@@ -1,0 +1,28 @@
+default:
+  image:
+    name: ghcr.io/prefix-dev/pixi:0.70.2
+    entrypoint: [""]
+  before_script:
+    - pixi install --locked
+
+stages:
+  - test
+  - deploy
+
+test:
+  stage: test
+  script:
+    - pixi run test
+
+deploy-pages:
+  stage: deploy
+  script:
+    - pixi run atlas explore --where .
+    - mkdir -p public
+    - cp -R .atlas/explorer/. public/
+  pages: true
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
