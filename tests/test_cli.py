@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 
@@ -21,6 +22,20 @@ def test_explore_writes_static_explorer(tmp_path):
     index = target / ".atlas" / "explorer" / "index.html"
     assert index.exists()
     assert "window.ATLAS_PAYLOAD" in index.read_text(encoding="utf-8")
+
+
+def test_explore_registers_output_dir_with_local_git_excludes(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    source = FIXTURES / "simple_package"
+    target = tmp_path / "simple_package"
+    shutil.copytree(source, target)
+
+    main(["explore", "--where", str(target)])
+    main(["explore", "--where", str(target)])
+
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
+    exclude_lines = exclude_path.read_text(encoding="utf-8").splitlines()
+    assert exclude_lines.count("/simple_package/.atlas/") == 1
 
 
 def test_explore_requires_explicit_where():

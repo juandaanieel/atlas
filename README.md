@@ -37,7 +37,9 @@ PATH_TO_FOLDER_TO_EXPLORE/.atlas/explorer/index.html
 ```
 
 Open `index.html` in a browser to view the explorer. The generated `.atlas`
-directory is output, not source code.
+directory is output, not source code. When the explored folder is inside a Git
+repository, Atlas adds the generated directory to `.git/info/exclude` so it stays
+out of `git status` without changing the repository's `.gitignore`.
 
 ## What it shows
 

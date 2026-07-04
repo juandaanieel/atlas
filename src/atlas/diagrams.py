@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from atlas.analyzer.payload import analyze_path
+from atlas.output import ensure_output_dir
 
 # How many function nodes the headline workflow may show before it stops being
 # readable. Branches are kept; depth is not truncated arbitrarily.
@@ -15,7 +16,7 @@ MAX_DEAD_SHOWN = 6
 def write_diagrams(path: str | Path) -> Path:
     root = Path(path).resolve()
     payload = analyze_path(root)
-    output_dir = root / ".atlas"
+    output_dir = ensure_output_dir(root)
     diagrams_dir = output_dir / "diagrams"
     diagrams_dir.mkdir(parents=True, exist_ok=True)
     for child in diagrams_dir.iterdir():

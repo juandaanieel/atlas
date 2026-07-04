@@ -12,6 +12,7 @@ from atlas.analyzer.imports import find_circular_imports
 from atlas.analyzer.model import build_model
 from atlas.analyzer.models import CallInfo, SymbolInfo, WarningInfo, to_dict
 from atlas.analyzer.parser import ParsedFile, parse_python_file
+from atlas.output import ensure_output_dir
 
 
 def analyze_path(path: str | Path) -> dict:
@@ -51,8 +52,7 @@ def analyze_path(path: str | Path) -> dict:
 def write_payload(path: str | Path) -> Path:
     root = Path(path).resolve()
     payload = analyze_path(root)
-    output_dir = root / ".atlas"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = ensure_output_dir(root)
     output_path = output_dir / "atlas.json"
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return output_path
@@ -66,8 +66,7 @@ def load_payload(path: str | Path) -> dict:
 def write_report(path: str | Path) -> Path:
     root = Path(path).resolve()
     payload = analyze_path(root)
-    output_dir = root / ".atlas"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = ensure_output_dir(root)
     output_path = output_dir / "report.md"
     output_path.write_text(_markdown_report(payload), encoding="utf-8")
     return output_path

@@ -5,13 +5,14 @@ import json
 import shutil
 from pathlib import Path
 
+from atlas.output import ensure_output_dir
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
 def write_explorer(root: str | Path, payload: dict) -> Path:
-    root_path = Path(root).resolve()
-    output_dir = root_path / ".atlas" / "explorer"
+    output_dir = ensure_output_dir(root) / "explorer"
     assets_dir = output_dir / "assets"
     styles_path = STATIC_DIR / "styles.css"
     app_path = STATIC_DIR / "src" / "app.js"
