@@ -82,11 +82,46 @@
       "\n\nNote: Related functions include only statically resolved callers and callees. Verify indirect, dynamic, and external use separately.";
   }
 
+  function shortestDirectedPath(edges, sourceId, targetId, disabled) {
+    if (sourceId === targetId) return [sourceId];
+    var outgoing = {};
+    edges.forEach(function (edge) {
+      if (disabled[edge.source] || disabled[edge.target]) return;
+      (outgoing[edge.source] = outgoing[edge.source] || []).push(edge.target);
+    });
+    Object.keys(outgoing).forEach(function (id) { outgoing[id].sort(); });
+
+    var previous = {};
+    var visited = {};
+    var queue = [sourceId];
+    visited[sourceId] = true;
+    for (var index = 0; index < queue.length; index += 1) {
+      var source = queue[index];
+      var targets = outgoing[source] || [];
+      for (var targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+        var target = targets[targetIndex];
+        if (visited[target]) continue;
+        visited[target] = true;
+        previous[target] = source;
+        if (target === targetId) return restorePath(previous, sourceId, targetId);
+        queue.push(target);
+      }
+    }
+    return null;
+  }
+
+  function restorePath(previous, sourceId, targetId) {
+    var path = [targetId];
+    while (path[0] !== sourceId) path.unshift(previous[path[0]]);
+    return path;
+  }
+
   global.AtlasCore = Object.freeze({
     buildReviewPrompt: buildReviewPrompt,
     combineReviewPrompts: combineReviewPrompts,
     hasLegacyGraphHashState: hasLegacyGraphHashState,
     parseHash: parseHash,
     serializeHash: serializeHash,
+    shortestDirectedPath: shortestDirectedPath,
   });
 })(window);

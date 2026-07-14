@@ -78,6 +78,10 @@ The explorer focuses on structural signals in Python packages:
 - Structurally duplicated functions.
 - Highly connected functions.
 - Circular imports and unresolved calls.
+- Interactive static call tracing across source files. Open a function and use
+  `Trace from`, then Shift-click another function or use `Trace to` in its
+  inspector. Atlas highlights the directed route and lets each call edge open
+  its exact source line.
 - A repository city map whose directory and file areas follow the Mindwalk
   squarified-treemap geometry; switch the left navigation rail to City map and
   click a directory to drill into its contents.

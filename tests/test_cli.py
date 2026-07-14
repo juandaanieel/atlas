@@ -68,6 +68,10 @@ def test_explore_writes_static_explorer(tmp_path):
     assert "graphPromptSelection" in app_text
     assert "graphPromptTarget" in app_text
     assert "graphPromptPipelineOrder" in app_text
+    assert "traceGraph" in app_text
+    assert "selectTraceEndpoint" in app_text
+    assert "data-trace-from" in app_text
+    assert "bindTraceEdge" in app_text
     assert "reviewPromptPanel" in app_text
     assert "reviewPromptItems" in app_text
     assert "data-copy-review-prompt" in app_text
@@ -91,6 +95,9 @@ def test_explore_writes_static_explorer(tmp_path):
     assert ".city-map-svg" in styles
     assert ".graph-prompt-composer" in styles
     assert ".graph-prompt-selected" in styles
+    assert ".trace-compartment-box" in styles
+    assert ".trace-dock" in styles
+    assert ".trace-edge" in styles
     index_text = index.read_text(encoding="utf-8")
     assert 'id="fullGraph"' in index_text
     assert 'id="cityMapRail"' in index_text
@@ -101,6 +108,9 @@ def test_explore_writes_static_explorer(tmp_path):
     assert 'id="detailSplitter"' not in index_text
     assert 'id="themeToggle"' in index_text
     assert 'id="graphPromptComposer"' in index_text
+    assert 'id="traceDock"' in index_text
+    core = (target / ".atlas" / "explorer" / "assets" / "src" / "core.js").read_text(encoding="utf-8")
+    assert "shortestDirectedPath" in core
     snapshot = json.loads((target / ".atlas" / "atlas.json").read_text(encoding="utf-8"))
     assert snapshot["citymap"]["layout"]["algorithm"] == "squarified-treemap-v2"
 
