@@ -1,6 +1,7 @@
 from pathlib import Path
+import subprocess
 
-from atlas.analyzer.discovery import discover_python_files, module_from_path
+from atlas.analyzer.discovery import discover_files, discover_python_files, module_from_path
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -35,3 +36,22 @@ def test_discovery_skips_pixi_environment(tmp_path):
     paths = [path.as_posix() for path in discover_python_files(tmp_path)]
 
     assert paths == ["pkg/module.py"]
+
+
+def test_discovery_honors_an_empty_git_ignore_result(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("*\n", encoding="utf-8")
+    (tmp_path / "ignored.py").write_text("def ignored():\n    return 1\n", encoding="utf-8")
+
+    assert discover_files(tmp_path) == []
+    assert discover_python_files(tmp_path) == []
+
+
+def test_discovery_skips_symlinked_files(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("def secret():\n    return 1\n", encoding="utf-8")
+    (root / "linked.py").symlink_to(outside)
+
+    assert discover_python_files(root) == []

@@ -14,6 +14,14 @@ dependencies = []
 classifiers = [
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+]
+
+[project.optional-dependencies]
+test = [
+    "jsonschema>=4.18,<5",
+    "pytest>=8,<9",
 ]
 
 [project.scripts]
@@ -25,6 +33,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 atlas = ["explorer/static/**/*"]
 
+[tool.setuptools.data-files]
+"share/atlas/schema" = ["schema/atlas.schema.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
@@ -35,7 +46,7 @@ channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.dependencies]
-python = ">=3.11"
+python = ">=3.9"
 pytest = ">=8.0"
 
 [tool.pixi.pypi-dependencies]

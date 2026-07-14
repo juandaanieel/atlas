@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 
 ENTRYPOINT_NAMES = {"main", "run", "cli", "app"}
 LARGE_FUNCTION_LOC = 50
@@ -32,7 +30,3 @@ def warning_message(warning: str) -> str:
         "parse_error": "Parse error",
     }
     return messages.get(warning, warning.replace("_", " ").title())
-
-
-def normalize_output_root(path: str | Path) -> Path:
-    return Path(path).resolve()

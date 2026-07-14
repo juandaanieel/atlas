@@ -135,6 +135,8 @@ def _function_symbol(
         is_test=is_test_symbol(node.name, file_is_test),
         is_entrypoint=is_entrypoint_name(node.name),
         decorators=[decorator_name(item) for item in node.decorator_list],
+        parameters=_function_parameters(node),
+        return_annotation=decorator_name(node.returns) if node.returns else None,
         docstring_summary=doc,
         source_excerpt=source_excerpt(lines, node),
         structure_hash=structure_hash,
@@ -142,6 +144,40 @@ def _function_symbol(
         is_wrapper=is_wrapper_body(node),
         metrics=_empty_metrics(),
         warnings=warnings,
+    )
+
+
+def _function_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, str | None]]:
+    parameters = []
+    positional = node.args.posonlyargs + node.args.args
+    defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+    for index, parameter in enumerate(positional):
+        kind = "positional-only" if index < len(node.args.posonlyargs) else "positional"
+        _add_parameter(parameters, parameter, kind, defaults[index])
+    if node.args.vararg:
+        _add_parameter(parameters, node.args.vararg, "variadic")
+    for parameter, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+        _add_parameter(parameters, parameter, "keyword-only", default)
+    if node.args.kwarg:
+        _add_parameter(parameters, node.args.kwarg, "keyword-variadic")
+    return parameters
+
+
+def _add_parameter(
+    parameters: list[dict[str, str | None]],
+    parameter: ast.arg,
+    kind: str,
+    default: ast.expr | None = None,
+) -> None:
+    if parameter.arg in {"self", "cls"}:
+        return
+    parameters.append(
+        {
+            "name": parameter.arg,
+            "kind": kind,
+            "annotation": decorator_name(parameter.annotation) if parameter.annotation else None,
+            "default": decorator_name(default) if default else None,
+        }
     )
 
 

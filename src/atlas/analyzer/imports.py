@@ -79,10 +79,16 @@ def build_import_aliases(
     for info in imports:
         if info.kind == "import":
             visible_name = info.alias or info.imported_module.split(".")[0]
-            module_name = info.imported_module
+            # ``import package.module`` binds ``package``. An explicit alias
+            # binds the complete module instead (``import package.module as m``).
+            module_name = (
+                info.imported_module
+                if info.alias
+                else info.imported_module.split(".")[0]
+            )
             local_module = imported_module_for_graph(info, local_modules)
             aliases[visible_name] = {
-                "module": local_module or module_name,
+                "module": module_name,
                 "symbol": None,
                 "external": local_module is None,
             }

@@ -691,4 +691,7 @@ packages:
   timestamp: 1764777166076
 - pypi: .
   name: atlas
+  requires_dist:
+  - jsonschema>=4.18,<5 ; extra == 'test'
+  - pytest>=8,<9 ; extra == 'test'
   requires_python: '>=3.9'

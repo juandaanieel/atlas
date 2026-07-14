@@ -136,6 +136,8 @@ def _classify_nodes(callables, roots, reachable, in_edges, out_edges, unresolved
                 "id": sid,
                 "name": symbol["name"],
                 "qualified_name": symbol["qualified_name"],
+                "kind": symbol["kind"],
+                "is_private": symbol["is_private"],
                 "module": symbol["module"],
                 "file_id": symbol["file_id"],
                 "line_start": symbol["line_start"],

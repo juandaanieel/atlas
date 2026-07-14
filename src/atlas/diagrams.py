@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict, deque
 from pathlib import Path
 
 from atlas.analyzer.payload import analyze_path
-from atlas.output import ensure_output_dir
+from atlas.output import checked_output_path, ensure_child_directory, ensure_output_dir
 
 # How many function nodes the headline workflow may show before it stops being
 # readable. Branches are kept; depth is not truncated arbitrarily.
@@ -17,19 +16,20 @@ def write_diagrams(path: str | Path) -> Path:
     root = Path(path).resolve()
     payload = analyze_path(root)
     output_dir = ensure_output_dir(root)
-    diagrams_dir = output_dir / "diagrams"
-    diagrams_dir.mkdir(parents=True, exist_ok=True)
+    diagrams_dir = ensure_child_directory(output_dir, "diagrams")
     for child in diagrams_dir.iterdir():
-        if child.is_file():
+        if child.is_symlink() or child.is_file():
             child.unlink()
-    (output_dir / "atlas.json").write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    checked_output_path(output_dir, "atlas.json").write_text(
+        payload.to_json(indent=2), encoding="utf-8"
+    )
 
     diagrams = {
         "workflow.mmd": workflow_diagram(payload["model"]),
         "map.mmd": map_diagram(payload["model"]),
     }
     for filename, content in diagrams.items():
-        (diagrams_dir / filename).write_text(content, encoding="utf-8")
+        checked_output_path(diagrams_dir, filename).write_text(content, encoding="utf-8")
     return diagrams_dir
 
 

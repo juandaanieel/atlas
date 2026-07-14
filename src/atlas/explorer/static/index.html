@@ -7,6 +7,14 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>Atlas Explorer</title>
+    <script>
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem("atlas-theme"); } catch (error) { /* use the system preference */ }
+        var theme = saved || "dark";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <link rel="stylesheet" href="assets/styles.css?v=__ATLAS_STYLES_VERSION__">
   </head>
   <body>
@@ -16,19 +24,33 @@
     <div class="shell">
       <aside class="sidebar">
         <div id="head" class="head"></div>
-        <div id="tree" class="tree"></div>
+        <nav id="sidebarTabs" class="sidebar-tabs" aria-label="Sidebar sections"></nav>
+        <nav id="views" class="views" aria-label="Pages"></nav>
+        <nav id="navigationModes" class="navigation-modes" aria-label="Repository navigation mode"></nav>
+        <div id="tree" class="tree" hidden></div>
+        <section id="cityMapRail" class="city-map-rail" aria-label="Repository city map"></section>
+        <section id="reviewPromptPanel" class="review-prompt-panel" aria-label="Review prompt" hidden></section>
       </aside>
       <main class="stage">
         <div class="toolbar">
+          <nav id="history" class="history" aria-label="Navigation"></nav>
           <div id="crumbs" class="crumbs"></div>
+          <div class="toolbar-actions">
+            <button id="fullGraph" class="toolbar-action" title="Open the full graph">Full graph</button>
+            <button id="themeToggle" class="theme-toggle" aria-pressed="false" aria-label="Toggle color theme" title="Toggle color theme">
+              <span class="theme-icon" aria-hidden="true">◐</span><span>Theme</span>
+            </button>
+          </div>
           <div id="tools" class="tools"></div>
         </div>
-        <svg id="canvas" class="canvas" role="img" aria-label="Scoped code graph"></svg>
+        <section id="graphPromptComposer" class="graph-prompt-composer" aria-label="Graph prompt composer" hidden></section>
+        <svg id="canvas" class="canvas" role="group" aria-label="Interactive scoped code graph" aria-describedby="hint"></svg>
+        <section id="tabContent" class="tab-content" hidden></section>
         <div class="hint" id="hint"></div>
       </main>
-      <div id="detailSplitter" class="detail-splitter" title="Resize details"></div>
-      <aside id="detail" class="detail-panel"></aside>
+      <aside id="detail" class="detail-panel" aria-label="Code details" tabindex="-1" hidden></aside>
     </div>
+    <script src="assets/src/core.js?v=__ATLAS_CORE_VERSION__"></script>
     <script src="assets/src/app.js?v=__ATLAS_APP_VERSION__"></script>
   </body>
 </html>

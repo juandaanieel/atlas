@@ -34,6 +34,15 @@ def test_reachability_partitions_roots_and_dead():
     assert summary["reachable_count"] + summary["dead_count"] == summary["callable_count"]
 
 
+def test_nodes_carry_visibility_and_kind():
+    model = _model("defect_package")
+    by_id = {node["id"]: node for node in model["nodes"]}
+
+    assert by_id["defect_pkg.core._unused_private"]["is_private"] is True
+    assert by_id["defect_pkg.core.run"]["is_private"] is False
+    assert by_id["defect_pkg.core.run"]["kind"] == "function"
+
+
 def test_orchestrator_is_load_bearing():
     model = _model("simple_package")
     by_id = {node["id"]: node for node in model["nodes"]}

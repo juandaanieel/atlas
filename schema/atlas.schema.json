@@ -1,0 +1,1163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.local/schema/atlas.schema.json",
+  "title": "Atlas analysis snapshot",
+  "description": "The persisted Atlas AnalysisSnapshot contract.",
+  "type": "object",
+  "required": [
+    "atlas_version",
+    "snapshot_version",
+    "snapshot_id",
+    "root",
+    "package_name",
+    "generated_at",
+    "files",
+    "symbols",
+    "objects",
+    "calls",
+    "imports",
+    "warnings",
+    "model",
+    "overview",
+    "architecture",
+    "citymap"
+  ],
+  "properties": {
+    "atlas_version": { "type": "string", "minLength": 1 },
+    "snapshot_version": { "const": 2 },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "root": { "type": "string", "minLength": 1 },
+    "package_name": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "symbols": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/symbol" }
+    },
+    "objects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/object" }
+    },
+    "calls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/call" }
+    },
+    "imports": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/import" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "model": { "$ref": "#/$defs/model" },
+    "overview": { "$ref": "#/$defs/overview" },
+    "architecture": { "$ref": "#/$defs/architecture" },
+    "citymap": { "$ref": "#/$defs/citymap" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "file": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "module",
+        "is_test",
+        "loc",
+        "function_count",
+        "class_count",
+        "warning_count"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "module": { "type": "string", "minLength": 1 },
+        "is_test": { "type": "boolean" },
+        "loc": { "type": "integer", "minimum": 0 },
+        "function_count": { "type": "integer", "minimum": 0 },
+        "class_count": { "type": "integer", "minimum": 0 },
+        "warning_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["name", "kind", "annotation", "default"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": [
+            "positional-only",
+            "positional",
+            "variadic",
+            "keyword-only",
+            "keyword-variadic"
+          ]
+        },
+        "annotation": { "$ref": "#/$defs/nullableString" },
+        "default": { "$ref": "#/$defs/nullableString" }
+      },
+      "additionalProperties": false
+    },
+    "symbolMetrics": {
+      "type": "object",
+      "required": [
+        "same_file_incoming",
+        "same_file_outgoing",
+        "cross_file_outgoing",
+        "external_outgoing",
+        "unresolved_outgoing"
+      ],
+      "properties": {
+        "same_file_incoming": { "type": "integer", "minimum": 0 },
+        "same_file_outgoing": { "type": "integer", "minimum": 0 },
+        "cross_file_outgoing": { "type": "integer", "minimum": 0 },
+        "external_outgoing": { "type": "integer", "minimum": 0 },
+        "unresolved_outgoing": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "symbol": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "kind",
+        "file_id",
+        "module",
+        "class_id",
+        "line_start",
+        "line_end",
+        "loc",
+        "is_async",
+        "is_private",
+        "is_test",
+        "is_entrypoint",
+        "decorators",
+        "parameters",
+        "return_annotation",
+        "docstring_summary",
+        "source_excerpt",
+        "structure_hash",
+        "structure_size",
+        "is_wrapper",
+        "metrics",
+        "warnings"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualified_name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["class", "function", "method"] },
+        "file_id": { "type": "string", "minLength": 1 },
+        "module": { "type": "string", "minLength": 1 },
+        "class_id": { "$ref": "#/$defs/nullableString" },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "loc": { "type": "integer", "minimum": 1 },
+        "is_async": { "type": "boolean" },
+        "is_private": { "type": "boolean" },
+        "is_test": { "type": "boolean" },
+        "is_entrypoint": { "type": "boolean" },
+        "decorators": { "$ref": "#/$defs/stringArray" },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "return_annotation": { "$ref": "#/$defs/nullableString" },
+        "docstring_summary": { "type": "string" },
+        "source_excerpt": { "type": "string" },
+        "structure_hash": { "type": "string" },
+        "structure_size": { "type": "integer", "minimum": 0 },
+        "is_wrapper": { "type": "boolean" },
+        "metrics": { "$ref": "#/$defs/symbolMetrics" },
+        "warnings": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "objectBase": {
+      "type": "object",
+      "required": ["name", "collaborator_id"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "collaborator_id": { "$ref": "#/$defs/nullableString" }
+      },
+      "additionalProperties": false
+    },
+    "constructorParameter": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "annotation",
+        "has_default",
+        "default",
+        "collaborator_id"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": [
+            "positional-only",
+            "positional",
+            "variadic",
+            "keyword-only",
+            "keyword-variadic"
+          ]
+        },
+        "annotation": { "$ref": "#/$defs/nullableString" },
+        "has_default": { "type": "boolean" },
+        "default": { "$ref": "#/$defs/nullableString" },
+        "collaborator_id": { "$ref": "#/$defs/nullableString" }
+      },
+      "additionalProperties": false
+    },
+    "objectConstructor": {
+      "type": "object",
+      "required": ["method_id", "params", "assigned_fields"],
+      "properties": {
+        "method_id": { "$ref": "#/$defs/nullableString" },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constructorParameter" }
+        },
+        "assigned_fields": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "objectField": {
+      "type": "object",
+      "required": [
+        "name",
+        "assigned_in",
+        "source_kind",
+        "source_name",
+        "collaborator_id",
+        "collaborator_kind"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "assigned_in": { "type": "string", "minLength": 1 },
+        "source_kind": { "enum": ["expression", "param", "call", "literal"] },
+        "source_name": { "type": "string" },
+        "collaborator_id": { "$ref": "#/$defs/nullableString" },
+        "collaborator_kind": {
+          "type": ["string", "null"],
+          "enum": ["injected", "owned", null]
+        }
+      },
+      "additionalProperties": false
+    },
+    "collaboratorCall": {
+      "type": "object",
+      "required": ["field", "method", "called_name", "line"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "minLength": 1 },
+        "called_name": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "fieldAccess": {
+      "type": "object",
+      "required": ["method_id", "reads", "writes", "collaborator_calls"],
+      "properties": {
+        "method_id": { "type": "string", "minLength": 1 },
+        "reads": { "$ref": "#/$defs/stringArray" },
+        "writes": { "$ref": "#/$defs/stringArray" },
+        "collaborator_calls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/collaboratorCall" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "objectMethods": {
+      "type": "object",
+      "required": ["public", "private"],
+      "properties": {
+        "public": { "$ref": "#/$defs/stringArray" },
+        "private": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "object": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "module",
+        "file_id",
+        "line_start",
+        "line_end",
+        "docstring_summary",
+        "source_excerpt",
+        "bases",
+        "constructor",
+        "fields",
+        "methods",
+        "field_access"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualified_name": { "type": "string", "minLength": 1 },
+        "module": { "type": "string", "minLength": 1 },
+        "file_id": { "type": "string", "minLength": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "docstring_summary": { "type": "string" },
+        "source_excerpt": { "type": "string" },
+        "bases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/objectBase" }
+        },
+        "constructor": { "$ref": "#/$defs/objectConstructor" },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/objectField" }
+        },
+        "methods": { "$ref": "#/$defs/objectMethods" },
+        "field_access": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fieldAccess" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "call": {
+      "type": "object",
+      "required": [
+        "source",
+        "target",
+        "called_name",
+        "kind",
+        "resolved",
+        "confidence",
+        "line"
+      ],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "$ref": "#/$defs/nullableString" },
+        "called_name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["same_file", "cross_file", "external", "unresolved"] },
+        "resolved": { "type": "boolean" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "line": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "import": {
+      "type": "object",
+      "required": [
+        "file_id",
+        "module",
+        "name",
+        "alias",
+        "imported_module",
+        "level",
+        "kind",
+        "line"
+      ],
+      "properties": {
+        "file_id": { "type": "string", "minLength": 1 },
+        "module": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "alias": { "$ref": "#/$defs/nullableString" },
+        "imported_module": { "type": "string" },
+        "level": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["import", "from"] },
+        "line": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "warning": {
+      "type": "object",
+      "required": ["id", "type", "message", "severity", "file_id", "symbol_id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "file_id": { "$ref": "#/$defs/nullableString" },
+        "symbol_id": { "$ref": "#/$defs/nullableString" }
+      },
+      "additionalProperties": false
+    },
+    "modelNode": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "kind",
+        "is_private",
+        "module",
+        "file_id",
+        "line_start",
+        "loc",
+        "docstring_summary",
+        "is_root",
+        "is_wrapper",
+        "fan_in",
+        "fan_out",
+        "unresolved_out",
+        "reachable",
+        "dead",
+        "is_hub",
+        "is_orchestrator",
+        "load_bearing",
+        "status"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualified_name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["function", "method"] },
+        "is_private": { "type": "boolean" },
+        "module": { "type": "string", "minLength": 1 },
+        "file_id": { "type": "string", "minLength": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "loc": { "type": "integer", "minimum": 1 },
+        "docstring_summary": { "type": "string" },
+        "is_root": { "type": "boolean" },
+        "is_wrapper": { "type": "boolean" },
+        "fan_in": { "type": "integer", "minimum": 0 },
+        "fan_out": { "type": "integer", "minimum": 0 },
+        "unresolved_out": { "type": "integer", "minimum": 0 },
+        "reachable": { "type": "boolean" },
+        "dead": { "type": "boolean" },
+        "is_hub": { "type": "boolean" },
+        "is_orchestrator": { "type": "boolean" },
+        "load_bearing": { "type": "boolean" },
+        "status": { "enum": ["dead", "root", "live"] }
+      },
+      "additionalProperties": false
+    },
+    "modelEdge": {
+      "type": "object",
+      "required": ["source", "target", "reachable"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "reachable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "cloneGroup": {
+      "type": "object",
+      "required": ["hash", "members", "size", "cross_module"],
+      "properties": {
+        "hash": { "type": "string", "minLength": 1 },
+        "members": { "$ref": "#/$defs/stringArray" },
+        "size": { "type": "integer", "minimum": 1 },
+        "cross_module": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "treeRollup": {
+      "type": "object",
+      "required": [
+        "functions",
+        "dead",
+        "clones",
+        "hubs",
+        "orchestrators",
+        "wrappers"
+      ],
+      "properties": {
+        "functions": { "type": "integer", "minimum": 0 },
+        "dead": { "type": "integer", "minimum": 0 },
+        "clones": { "type": "integer", "minimum": 0 },
+        "hubs": { "type": "integer", "minimum": 0 },
+        "orchestrators": { "type": "integer", "minimum": 0 },
+        "wrappers": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "modelTree": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "type",
+        "module",
+        "function_ids",
+        "children",
+        "rollup"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "type": { "enum": ["module", "package"] },
+        "module": { "$ref": "#/$defs/nullableString" },
+        "function_ids": { "$ref": "#/$defs/stringArray" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/modelTree" }
+        },
+        "rollup": { "$ref": "#/$defs/treeRollup" }
+      },
+      "additionalProperties": false
+    },
+    "layerBand": {
+      "type": "object",
+      "required": ["layer", "modules", "module_count", "function_count"],
+      "properties": {
+        "layer": { "type": "string", "minLength": 1 },
+        "modules": { "$ref": "#/$defs/stringArray" },
+        "module_count": { "type": "integer", "minimum": 1 },
+        "function_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "layerEdge": {
+      "type": "object",
+      "required": ["source", "target", "weight"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "weight": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "layerViolation": {
+      "type": "object",
+      "required": ["layers"],
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelSummary": {
+      "type": "object",
+      "required": [
+        "callable_count",
+        "root_count",
+        "reachable_count",
+        "dead_count",
+        "load_bearing_count",
+        "wrapper_count",
+        "clone_group_count",
+        "cloned_function_count",
+        "layer_violation_count"
+      ],
+      "properties": {
+        "callable_count": { "type": "integer", "minimum": 0 },
+        "root_count": { "type": "integer", "minimum": 0 },
+        "reachable_count": { "type": "integer", "minimum": 0 },
+        "dead_count": { "type": "integer", "minimum": 0 },
+        "load_bearing_count": { "type": "integer", "minimum": 0 },
+        "wrapper_count": { "type": "integer", "minimum": 0 },
+        "clone_group_count": { "type": "integer", "minimum": 0 },
+        "cloned_function_count": { "type": "integer", "minimum": 0 },
+        "layer_violation_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "package_name",
+        "nodes",
+        "edges",
+        "roots",
+        "clones",
+        "tree",
+        "wrappers",
+        "layers",
+        "layer_violations",
+        "summary"
+      ],
+      "properties": {
+        "package_name": { "type": "string", "minLength": 1 },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/modelNode" }
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/modelEdge" }
+        },
+        "roots": { "$ref": "#/$defs/stringArray" },
+        "clones": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/cloneGroup" }
+        },
+        "tree": { "$ref": "#/$defs/modelTree" },
+        "wrappers": { "$ref": "#/$defs/stringArray" },
+        "layers": {
+          "type": "object",
+          "required": ["bands", "edges"],
+          "properties": {
+            "bands": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/layerBand" }
+            },
+            "edges": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/layerEdge" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "layer_violations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/layerViolation" }
+        },
+        "summary": { "$ref": "#/$defs/modelSummary" }
+      },
+      "additionalProperties": false
+    },
+    "symbolSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "file_id",
+        "loc",
+        "line_start",
+        "warnings",
+        "metrics"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualified_name": { "type": "string", "minLength": 1 },
+        "file_id": { "type": "string", "minLength": 1 },
+        "loc": { "type": "integer", "minimum": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "warnings": { "$ref": "#/$defs/stringArray" },
+        "metrics": { "$ref": "#/$defs/symbolMetrics" }
+      },
+      "additionalProperties": false
+    },
+    "unresolvedFileSummary": {
+      "type": "object",
+      "required": ["file_id", "unresolved_calls"],
+      "properties": {
+        "file_id": { "type": "string", "minLength": 1 },
+        "unresolved_calls": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "overview": {
+      "type": "object",
+      "required": [
+        "file_count",
+        "module_count",
+        "function_count",
+        "class_count",
+        "method_count",
+        "test_file_count",
+        "entrypoint_count",
+        "undocumented_function_count",
+        "unresolved_call_count",
+        "external_call_count",
+        "cross_file_call_count",
+        "circular_import_count",
+        "dead_function_count",
+        "clone_group_count",
+        "load_bearing_count",
+        "wrapper_count",
+        "layer_violation_count",
+        "largest_functions",
+        "most_connected_functions",
+        "files_with_most_unresolved",
+        "circular_imports",
+        "entrypoints"
+      ],
+      "properties": {
+        "file_count": { "type": "integer", "minimum": 0 },
+        "module_count": { "type": "integer", "minimum": 0 },
+        "function_count": { "type": "integer", "minimum": 0 },
+        "class_count": { "type": "integer", "minimum": 0 },
+        "method_count": { "type": "integer", "minimum": 0 },
+        "test_file_count": { "type": "integer", "minimum": 0 },
+        "entrypoint_count": { "type": "integer", "minimum": 0 },
+        "undocumented_function_count": { "type": "integer", "minimum": 0 },
+        "unresolved_call_count": { "type": "integer", "minimum": 0 },
+        "external_call_count": { "type": "integer", "minimum": 0 },
+        "cross_file_call_count": { "type": "integer", "minimum": 0 },
+        "circular_import_count": { "type": "integer", "minimum": 0 },
+        "dead_function_count": { "type": "integer", "minimum": 0 },
+        "clone_group_count": { "type": "integer", "minimum": 0 },
+        "load_bearing_count": { "type": "integer", "minimum": 0 },
+        "wrapper_count": { "type": "integer", "minimum": 0 },
+        "layer_violation_count": { "type": "integer", "minimum": 0 },
+        "largest_functions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/symbolSummary" }
+        },
+        "most_connected_functions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/symbolSummary" }
+        },
+        "files_with_most_unresolved": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/unresolvedFileSummary" }
+        },
+        "circular_imports": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stringArray" }
+        },
+        "entrypoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/symbolSummary" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "architectureIncomingCall": {
+      "type": "object",
+      "required": ["id", "kind", "line"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["same_file", "cross_file"] },
+        "line": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "architectureOutgoingCall": {
+      "type": "object",
+      "required": ["id", "kind", "line", "called_name", "confidence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["same_file", "cross_file"] },
+        "line": { "type": "integer", "minimum": 1 },
+        "called_name": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "architectureUnresolvedCall": {
+      "type": "object",
+      "required": ["called_name", "line"],
+      "properties": {
+        "called_name": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "architectureFunction": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "kind",
+        "module",
+        "file_id",
+        "line_start",
+        "line_end",
+        "docstring_summary",
+        "is_test",
+        "is_private",
+        "state",
+        "role",
+        "role_source",
+        "tags",
+        "parameters",
+        "return_annotation",
+        "callers",
+        "callees",
+        "unresolved_calls",
+        "fan_in",
+        "fan_out",
+        "is_root",
+        "is_hub",
+        "is_orchestrator",
+        "is_wrapper",
+        "in_static_map",
+        "snapshot_id",
+        "functionalities"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualified_name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["function", "method"] },
+        "module": { "type": "string", "minLength": 1 },
+        "file_id": { "type": "string", "minLength": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "docstring_summary": { "type": "string" },
+        "is_test": { "type": "boolean" },
+        "is_private": { "type": "boolean" },
+        "state": { "enum": ["test", "unmodeled", "dead", "root", "live"] },
+        "role": { "type": "string", "minLength": 1 },
+        "role_source": { "enum": ["docstring", "atlas"] },
+        "tags": { "$ref": "#/$defs/stringArray" },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "return_annotation": { "$ref": "#/$defs/nullableString" },
+        "callers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/architectureIncomingCall" }
+        },
+        "callees": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/architectureOutgoingCall" }
+        },
+        "unresolved_calls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/architectureUnresolvedCall" }
+        },
+        "fan_in": { "type": "integer", "minimum": 0 },
+        "fan_out": { "type": "integer", "minimum": 0 },
+        "is_root": { "type": "boolean" },
+        "is_hub": { "type": "boolean" },
+        "is_orchestrator": { "type": "boolean" },
+        "is_wrapper": { "type": "boolean" },
+        "in_static_map": { "type": "boolean" },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "functionalities": { "$ref": "#/$defs/stringArray" }
+      },
+      "additionalProperties": false
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["id", "root", "title", "summary", "function_ids", "edge_count"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "root": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "function_ids": { "$ref": "#/$defs/stringArray" },
+        "edge_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "useCase": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "title",
+        "summary",
+        "kind",
+        "example_paths",
+        "function_ids",
+        "architecture"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["guide", "example", "documentation", "workflow"] },
+        "example_paths": { "$ref": "#/$defs/stringArray" },
+        "function_ids": { "$ref": "#/$defs/stringArray" },
+        "architecture": {
+          "type": "object",
+          "required": ["workflow_ids"],
+          "properties": {
+            "workflow_ids": { "$ref": "#/$defs/stringArray" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "functionality": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "summary",
+        "status",
+        "tags",
+        "member_ids",
+        "missing_member_ids",
+        "path"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["accepted", "proposed"] },
+        "tags": { "$ref": "#/$defs/stringArray" },
+        "member_ids": { "$ref": "#/$defs/stringArray" },
+        "missing_member_ids": { "$ref": "#/$defs/stringArray" },
+        "path": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "functionalityIssue": {
+      "type": "object",
+      "required": ["type", "functionality_id", "path", "member_ids", "message"],
+      "properties": {
+        "type": { "const": "missing_functionality_members" },
+        "functionality_id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "member_ids": { "$ref": "#/$defs/stringArray" },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "architecture": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "functions",
+        "pipelines",
+        "use_cases",
+        "functionalities",
+        "functionality_issues"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "functions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/architectureFunction" }
+        },
+        "pipelines": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pipeline" }
+        },
+        "use_cases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/useCase" }
+        },
+        "functionalities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/functionality" }
+        },
+        "functionality_issues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/functionalityIssue" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "rect": {
+      "type": "object",
+      "required": ["x", "z", "w", "d"],
+      "properties": {
+        "x": { "type": "number" },
+        "z": { "type": "number" },
+        "w": { "type": "number", "minimum": 0 },
+        "d": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "risk": {
+      "enum": ["neutral", "elevated", "severe"]
+    },
+    "codeFacts": {
+      "type": "object",
+      "required": [
+        "kind",
+        "code_loc",
+        "callable_count",
+        "callable_ids",
+        "class_count",
+        "is_test",
+        "warning_count",
+        "warning_types",
+        "unresolved_calls",
+        "dead_function_count",
+        "clone_group_ids",
+        "load_bearing_function_count",
+        "large_function_loc",
+        "functionality_ids",
+        "layer_violation_ids",
+        "risk"
+      ],
+      "properties": {
+        "kind": { "const": "code" },
+        "code_loc": { "type": "integer", "minimum": 0 },
+        "callable_count": { "type": "integer", "minimum": 0 },
+        "callable_ids": { "$ref": "#/$defs/stringArray" },
+        "class_count": { "type": "integer", "minimum": 0 },
+        "is_test": { "type": "boolean" },
+        "warning_count": { "type": "integer", "minimum": 0 },
+        "warning_types": { "$ref": "#/$defs/stringArray" },
+        "unresolved_calls": { "type": "integer", "minimum": 0 },
+        "dead_function_count": { "type": "integer", "minimum": 0 },
+        "clone_group_ids": { "$ref": "#/$defs/stringArray" },
+        "load_bearing_function_count": { "type": "integer", "minimum": 0 },
+        "large_function_loc": { "type": "integer", "minimum": 0 },
+        "functionality_ids": { "$ref": "#/$defs/stringArray" },
+        "layer_violation_ids": { "$ref": "#/$defs/stringArray" },
+        "risk": { "$ref": "#/$defs/risk" }
+      },
+      "additionalProperties": false
+    },
+    "nonCodeFacts": {
+      "type": "object",
+      "required": ["kind", "risk"],
+      "properties": {
+        "kind": { "const": "non-code" },
+        "risk": { "const": "neutral" }
+      },
+      "additionalProperties": false
+    },
+    "directoryFacts": {
+      "type": "object",
+      "required": [
+        "code_file_count",
+        "test_file_count",
+        "flagged_file_count",
+        "code_loc",
+        "callable_count",
+        "class_count",
+        "warning_count",
+        "warning_types",
+        "unresolved_calls",
+        "dead_function_count",
+        "clone_group_ids",
+        "load_bearing_function_count",
+        "large_function_loc",
+        "functionality_ids",
+        "layer_violation_ids",
+        "risk"
+      ],
+      "properties": {
+        "code_file_count": { "type": "integer", "minimum": 0 },
+        "test_file_count": { "type": "integer", "minimum": 0 },
+        "flagged_file_count": { "type": "integer", "minimum": 0 },
+        "code_loc": { "type": "integer", "minimum": 0 },
+        "callable_count": { "type": "integer", "minimum": 0 },
+        "class_count": { "type": "integer", "minimum": 0 },
+        "warning_count": { "type": "integer", "minimum": 0 },
+        "warning_types": { "$ref": "#/$defs/stringArray" },
+        "unresolved_calls": { "type": "integer", "minimum": 0 },
+        "dead_function_count": { "type": "integer", "minimum": 0 },
+        "clone_group_ids": { "$ref": "#/$defs/stringArray" },
+        "load_bearing_function_count": { "type": "integer", "minimum": 0 },
+        "large_function_loc": { "type": "integer", "minimum": 0 },
+        "functionality_ids": { "$ref": "#/$defs/stringArray" },
+        "layer_violation_ids": { "$ref": "#/$defs/stringArray" },
+        "risk": { "$ref": "#/$defs/risk" }
+      },
+      "additionalProperties": false
+    },
+    "citymapFile": {
+      "type": "object",
+      "required": ["id", "path", "dir", "lines", "bytes", "lang", "rect", "facts"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 0 },
+        "path": { "type": "string", "minLength": 1 },
+        "dir": { "type": "string" },
+        "lines": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "lang": { "type": "string", "minLength": 1 },
+        "rect": { "$ref": "#/$defs/rect" },
+        "facts": {
+          "oneOf": [
+            { "$ref": "#/$defs/codeFacts" },
+            { "$ref": "#/$defs/nonCodeFacts" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "citymapDir": {
+      "type": "object",
+      "required": [
+        "path",
+        "depth",
+        "rect",
+        "header_rect",
+        "content_rect",
+        "file_count",
+        "lines",
+        "facts"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "depth": { "type": "integer", "minimum": 1 },
+        "rect": { "$ref": "#/$defs/rect" },
+        "header_rect": { "$ref": "#/$defs/rect" },
+        "content_rect": { "$ref": "#/$defs/rect" },
+        "file_count": { "type": "integer", "minimum": 1 },
+        "lines": { "type": "integer", "minimum": 0 },
+        "facts": { "$ref": "#/$defs/directoryFacts" }
+      },
+      "additionalProperties": false
+    },
+    "citymapSummary": {
+      "type": "object",
+      "required": [
+        "total_loc",
+        "code_file_count",
+        "flagged_file_count",
+        "unresolved_calls",
+        "load_bearing_functions",
+        "layer_violation_count"
+      ],
+      "properties": {
+        "total_loc": { "type": "integer", "minimum": 0 },
+        "code_file_count": { "type": "integer", "minimum": 0 },
+        "flagged_file_count": { "type": "integer", "minimum": 0 },
+        "unresolved_calls": { "type": "integer", "minimum": 0 },
+        "load_bearing_functions": { "type": "integer", "minimum": 0 },
+        "layer_violation_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "citymap": {
+      "type": "object",
+      "required": ["version", "files", "dirs", "summary", "layout"],
+      "properties": {
+        "version": { "const": 2 },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/citymapFile" }
+        },
+        "dirs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/citymapDir" }
+        },
+        "summary": { "$ref": "#/$defs/citymapSummary" },
+        "layout": {
+          "type": "object",
+          "required": ["algorithm", "weight", "root_rect", "root_content_rect"],
+          "properties": {
+            "algorithm": { "const": "squarified-treemap-v2" },
+            "weight": {
+              "const": "sqrt(max(code_loc, 16)); non-code files use text and byte fallback"
+            },
+            "root_rect": { "$ref": "#/$defs/rect" },
+            "root_content_rect": { "$ref": "#/$defs/rect" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

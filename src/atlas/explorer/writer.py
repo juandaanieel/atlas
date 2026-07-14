@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 from pathlib import Path
 
-from atlas.output import ensure_output_dir
+from atlas.analyzer.snapshot import AnalysisSnapshot
+from atlas.output import checked_output_path, ensure_output_subdir
 
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def write_explorer(root: str | Path, payload: dict) -> Path:
-    output_dir = ensure_output_dir(root) / "explorer"
-    assets_dir = output_dir / "assets"
+def write_explorer(root: str | Path, snapshot: AnalysisSnapshot) -> Path:
+    output_dir = ensure_output_subdir(root, "explorer")
+    assets_dir = checked_output_path(output_dir, "assets")
     styles_path = STATIC_DIR / "styles.css"
+    core_path = STATIC_DIR / "src" / "core.js"
     app_path = STATIC_DIR / "src" / "app.js"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     if assets_dir.exists():
         shutil.rmtree(assets_dir)
@@ -24,16 +24,27 @@ def write_explorer(root: str | Path, payload: dict) -> Path:
     shutil.copy2(styles_path, assets_dir / "styles.css")
 
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    html = (
+    template = (
         template
-        .replace("__ATLAS_PAYLOAD__", json.dumps(payload, sort_keys=True))
         .replace("__ATLAS_STYLES_VERSION__", _asset_version(styles_path))
+        .replace("__ATLAS_CORE_VERSION__", _asset_version(core_path))
         .replace("__ATLAS_APP_VERSION__", _asset_version(app_path))
     )
-    output_path = output_dir / "index.html"
+    html = template.replace("__ATLAS_PAYLOAD__", _script_safe_json(snapshot))
+    output_path = checked_output_path(output_dir, "index.html")
     output_path.write_text(html, encoding="utf-8")
     return output_path
 
 
 def _asset_version(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def _script_safe_json(snapshot: AnalysisSnapshot) -> str:
+    """Escape HTML-significant characters before placing JSON in a script."""
+    return (
+        snapshot.to_json()
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )

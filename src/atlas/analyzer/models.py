@@ -33,6 +33,8 @@ class SymbolInfo:
     is_test: bool
     is_entrypoint: bool
     decorators: list[str] = field(default_factory=list)
+    parameters: list[dict[str, str | None]] = field(default_factory=list)
+    return_annotation: str | None = None
     docstring_summary: str = "No docstring"
     source_excerpt: str = ""
     structure_hash: str = ""

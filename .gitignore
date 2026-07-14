@@ -1,11 +1,15 @@
 .claude/
+.atlas/
 .pixi/
 .pytest_cache/
 .ruff_cache/
 .venv/
 __pycache__/
 *.py[cod]
+.coverage
+coverage.xml
 .DS_Store
 dist/
 build/
+htmlcov/
 *.egg-info/

@@ -14,6 +14,27 @@ test:
   script:
     - pixi run test
 
+test-python-floor:
+  stage: test
+  image: python:3.9-slim
+  before_script: []
+  script:
+    - python -m pip install --disable-pip-version-check -e ".[test]"
+    - python -B -m pytest
+
+distribution:
+  stage: test
+  image: python:3.13-slim
+  before_script: []
+  script:
+    - python -m pip wheel --disable-pip-version-check --no-deps --wheel-dir dist .
+    - python -m venv /tmp/atlas-wheel
+    - /tmp/atlas-wheel/bin/python -m pip install --disable-pip-version-check --no-deps dist/*.whl
+    - cd /tmp
+    - /tmp/atlas-wheel/bin/atlas --help
+    - /tmp/atlas-wheel/bin/python -c "from atlas.explorer.writer import STATIC_DIR; assert (STATIC_DIR / 'index.html').is_file(); assert (STATIC_DIR / 'styles.css').is_file(); assert (STATIC_DIR / 'src/app.js').is_file()"
+    - /tmp/atlas-wheel/bin/python -c "import sysconfig; from pathlib import Path; assert (Path(sysconfig.get_path('data')) / 'share/atlas/schema/atlas.schema.json').is_file()"
+
 deploy-pages:
   stage: deploy
   script:
