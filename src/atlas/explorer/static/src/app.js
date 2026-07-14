@@ -33,9 +33,14 @@
   var objects = payload.objects || [];
   var objectById = {};
   var objectsByModule = {};
+  var methodObjectById = {};
   objects.forEach(function (o) {
     objectById[o.id] = o;
     (objectsByModule[o.module] = objectsByModule[o.module] || []).push(o);
+    var methodIds = [];
+    if (o.constructor && o.constructor.method_id) methodIds.push(o.constructor.method_id);
+    methodIds = methodIds.concat((o.methods && o.methods.public) || [], (o.methods && o.methods.private) || []);
+    methodIds.forEach(function (id) { methodObjectById[id] = o.id; });
   });
   var architecture = payload.architecture || { functions: [], pipelines: [], use_cases: [], functionalities: [] };
   var architectureById = {};
@@ -102,12 +107,15 @@
     collapsedFunctionSections: {},
     collapsedFunctionClasses: {},
     lastFunctionClick: null,
-    theme: document.documentElement.getAttribute("data-theme") || "light",
   };
   var view = { x: MARGIN, y: MARGIN, scale: 1 };
+  var viewportTarget = { x: MARGIN, y: MARGIN, scale: 1 };
   var graphRoot = null;
   var graphTransformFrame = null;
+  var graphLayoutFrame = null;
+  var finishGraphMotion = null;
   var graphResizeFrame = null;
+  var lastTopologyKey = null;
   var renderedDetailKey = null;
   var detailReturnFocus = null;
   var detailFocusFrame = null;
@@ -132,6 +140,7 @@
   readHash();
   renderHead();
   bindToolbarActions();
+  bindDetailResize();
   renderViews();
   renderNavigationSurface();
   rerender();
@@ -168,11 +177,11 @@
       if (params.type === "object" && objectById[graphId]) {
         state.graphSelection = graphId;
         state.graphSelectionType = "object";
-        state.objectFocus = graphId;
         if (!params.detail) state.detailSelection = { type: "object", id: graphId };
       } else if (nodeById[graphId] && !state.disabled[graphId]) {
         state.graphSelection = graphId;
         state.graphSelectionType = "function";
+        state.traceStart = graphId;
         if (!params.source && !params.detail) state.detailSelection = { type: "function", id: graphId };
       }
     }
@@ -183,11 +192,14 @@
       state.mapSelection = { kind: params.mapType, path: params.map };
     }
     if (params.objectFocus && objectById[params.objectFocus]) {
-      state.objectFocus = params.objectFocus;
+      state.scope = objectById[params.objectFocus].module;
+      state.mode = "objects";
+      if (!hasExplicitWorkspace) state.workspace = "graph";
     }
     if (params.detailType === "object" && params.detail && objectById[params.detail]) {
       state.detailSelection = { type: "object", id: params.detail };
-      state.objectFocus = params.detail;
+      state.scope = objectById[params.detail].module;
+      state.mode = "objects";
     }
     if (params.detailType === "function" && params.detail && nodeById[params.detail] && !state.disabled[params.detail]) {
       state.detailSelection = { type: "function", id: params.detail };
@@ -196,10 +208,16 @@
       state.detailSelection = { type: "function", id: params.source };
     }
     if (params.focus && nodeById[params.focus]) state.focus = params.focus;
-    if (state.objectFocus) {
-      if (!hasExplicitWorkspace) state.workspace = "graph";
-      state.mode = "objects";
+    if (params.traceStart && activeTraceFunction(params.traceStart)) {
+      state.traceStart = params.traceStart;
+      if (params.scope === undefined) {
+        state.scope = moduleOf(params.traceStart);
+        expandTo(state.scope);
+      }
     }
+    if (params.traceEnd && activeTraceFunction(params.traceEnd)) state.traceEnd = params.traceEnd;
+    if (!params.mode && objectDominated(treeByPath[state.scope] || tree)) state.mode = "objects";
+    state.objectFocus = null;
   }
 
   function writeHash() {
@@ -209,13 +227,20 @@
   // --- scope -> graph -----------------------------------------------------
 
   function currentGraph() {
-    if (state.objectFocus && objectById[state.objectFocus]) return objectMethodGraph(objectById[state.objectFocus]);
-    if (state.traceStart && nodeById[state.traceStart]) return traceGraph(state.traceStart, state.traceEnd);
-    if (state.focus) return focusGraph(state.focus);
+    var graph = baseGraph();
+    return state.traceStart && nodeById[state.traceStart]
+      ? applyTrace(graph, state.traceStart, state.traceEnd)
+      : graph;
+  }
+
+  function baseGraph() {
+    var graph;
+    if (state.focus) graph = focusGraph(state.focus);
     var node = treeByPath[state.scope] || tree;
-    if (state.mode === "objects" && scopeObjects(node).length) return objectGraph(node);
-    if (node.type === "module") return moduleGraph(node);
-    return packageGraph(node);
+    if (!graph && state.mode === "objects" && scopeObjects(node).length) graph = objectGraph(node);
+    if (!graph && node.type === "module") graph = moduleGraph(node);
+    if (!graph) graph = packageGraph(node);
+    return graph;
   }
 
   function packageGraph(node) {
@@ -267,6 +292,56 @@
   }
 
   function objectGraph(node) {
+    if (node.type !== "module") return objectRelationshipGraph(node);
+
+    var activeIds = activeFunctionIds(node);
+    var active = setOf(activeIds);
+    var claimed = {};
+    var groups = scopeObjects(node).map(function (object) {
+      var itemIds = objectMethodIds(object).filter(function (id) { return active[id]; });
+      var constructorId = object.constructor && object.constructor.method_id;
+      itemIds.forEach(function (id) { claimed[id] = object.id; });
+      return {
+        id: object.id,
+        object: object,
+        label: object.name,
+        itemIds: itemIds,
+        anchorId: itemIds.indexOf(constructorId) >= 0 ? constructorId : null,
+      };
+    });
+    var items = activeIds.map(function (id) {
+      var item = fnItem(id);
+      item.objectId = claimed[id] || null;
+      item.isConstructor = !!item.objectId && groups.some(function (methodGroup) {
+        return methodGroup.id === item.objectId && methodGroup.anchorId === id;
+      });
+      return item;
+    });
+    var edges = model.edges.filter(function (edgeInfo) {
+      return active[edgeInfo.source] && active[edgeInfo.target];
+    }).map(function (edgeInfo) {
+      return { source: edgeInfo.source, target: edgeInfo.target, weight: 1 };
+    }).sort(compareEdges);
+    var stateLinks = [];
+    groups.forEach(function (methodGroup) {
+      var groupIds = setOf(methodGroup.itemIds);
+      var callEdges = edges.filter(function (edgeInfo) {
+        return groupIds[edgeInfo.source] && groupIds[edgeInfo.target];
+      });
+      stateLinks = stateLinks.concat(stateLinksForObject(methodGroup.object, methodGroup.itemIds, callEdges));
+    });
+    return {
+      items: items,
+      edges: edges,
+      stateLinks: stateLinks,
+      groups: groups,
+      freeItemIds: activeIds.filter(function (id) { return !claimed[id]; }),
+      kind: "object-overview",
+      clones: cloneEdges(activeIds),
+    };
+  }
+
+  function objectRelationshipGraph(node) {
     var moduleObjectsList = scopeObjects(node);
     var present = {};
     moduleObjectsList.forEach(function (object) { present[object.id] = true; });
@@ -422,55 +497,100 @@
   }
 
   function traceGraph(startId, endId) {
+    return applyTrace(baseGraph(), startId, endId);
+  }
+
+  // Tracing is an emphasis layer over the scoped graph. Keeping the base
+  // graph intact preserves unrelated and orphaned functions while the static
+  // route remains unmistakable.
+  function applyTrace(graph, startId, endId) {
+    if (graph.kind !== "function" && graph.kind !== "object-overview") {
+      var moduleNode = treeByPath[moduleOf(startId)] || tree;
+      graph = state.mode === "objects" && scopeObjects(moduleNode).length
+        ? objectGraph(moduleNode)
+        : moduleGraph(moduleNode);
+    }
     var route = endId
       ? core.shortestDirectedPath(model.edges, startId, endId, state.disabled)
       : null;
-    var ids;
-    if (endId) {
-      ids = route || [startId, endId];
-    } else {
-      ids = [startId]
+    var tracedIds = endId
+      ? route || [startId, endId]
+      : [startId]
         .concat((inAdj[startId] || []).filter(activeTraceFunction))
         .concat((outAdj[startId] || []).filter(activeTraceFunction));
-    }
-    ids = ids.filter(function (id, index) { return ids.indexOf(id) === index; });
-    var present = setOf(ids);
-    var routeEdges = {};
+    tracedIds = tracedIds.filter(function (id, index) { return tracedIds.indexOf(id) === index; });
+
+    var present = {};
+    graph.items.forEach(function (item) { present[item.id] = true; });
+    tracedIds.forEach(function (id) {
+      if (present[id] || !activeTraceFunction(id)) return;
+      var item = fnItem(id);
+      graph.items.push(item);
+      present[id] = true;
+      if (graph.kind !== "object-overview") return;
+      var objectId = methodObjectById[id];
+      var object = objectId && objectById[objectId];
+      if (!object) {
+        graph.freeItemIds.push(id);
+        return;
+      }
+      var methodGroup = graph.groups.filter(function (candidate) { return candidate.id === objectId; })[0];
+      if (!methodGroup) {
+        methodGroup = {
+          id: objectId,
+          object: object,
+          label: object.module.split(".").slice(-1)[0] + "." + object.name,
+          itemIds: [],
+          anchorId: null,
+          traceContext: true,
+        };
+        graph.groups.push(methodGroup);
+      }
+      methodGroup.itemIds.push(id);
+      item.objectId = objectId;
+      item.isConstructor = !!object.constructor && object.constructor.method_id === id;
+      if (item.isConstructor) methodGroup.anchorId = id;
+    });
+
+    var traceEdges = {};
     if (route) {
       for (var index = 0; index < route.length - 1; index += 1) {
-        routeEdges[route[index] + ">" + route[index + 1]] = true;
+        traceEdges[route[index] + ">" + route[index + 1]] = true;
       }
+    } else if (!endId) {
+      (inAdj[startId] || []).forEach(function (source) { traceEdges[source + ">" + startId] = true; });
+      (outAdj[startId] || []).forEach(function (target) { traceEdges[startId + ">" + target] = true; });
     }
-    var edges = model.edges.filter(function (edgeInfo) {
-      if (!present[edgeInfo.source] || !present[edgeInfo.target]) return false;
-      return !endId || !!routeEdges[edgeInfo.source + ">" + edgeInfo.target];
-    }).map(function (edgeInfo) {
-      return {
-        source: edgeInfo.source,
-        target: edgeInfo.target,
-        weight: 1,
-        inTrace: !endId || !!routeEdges[edgeInfo.source + ">" + edgeInfo.target],
-      };
+
+    var edgeByKey = {};
+    graph.edges = graph.edges.map(function (edgeInfo) {
+      var copy = Object.assign({}, edgeInfo);
+      var key = copy.source + ">" + copy.target;
+      copy.inTrace = !!traceEdges[key];
+      edgeByKey[key] = copy;
+      return copy;
     });
-    var items = ids.map(fnItem);
-    items.forEach(function (item) {
+    model.edges.forEach(function (edgeInfo) {
+      var key = edgeInfo.source + ">" + edgeInfo.target;
+      if (!traceEdges[key] || edgeByKey[key] || !present[edgeInfo.source] || !present[edgeInfo.target]) return;
+      var copy = { source: edgeInfo.source, target: edgeInfo.target, weight: 1, inTrace: true };
+      graph.edges.push(copy);
+      edgeByKey[key] = copy;
+    });
+
+    graph.items.forEach(function (item) {
       item.traceOrder = route ? route.indexOf(item.id) : null;
       if (item.id === startId) item.traceRole = "start";
       else if (item.id === endId) item.traceRole = "end";
-      else if (route) item.traceRole = "route";
-      else item.traceRole = "context";
+      else if (tracedIds.indexOf(item.id) >= 0) item.traceRole = "route";
     });
-    return {
-      items: items,
-      edges: edges,
-      kind: "trace",
-      center: startId,
-      traceStart: startId,
-      traceEnd: endId,
-      route: route,
-      noRoute: !!endId && !route,
-      compartments: [],
-    };
+    graph.center = startId;
+    graph.traceActive = true;
+    graph.traceStart = startId;
+    graph.traceEnd = endId;
+    graph.route = route;
+    graph.noRoute = !!endId && !route;
+    return graph;
   }
 
   function activeTraceFunction(id) {
@@ -543,6 +663,10 @@
   // --- layered layout (presentation only) ---------------------------------
 
   function layout(graph) {
+    if (graph.kind === "object-overview") {
+      layoutObjectOverviewGraph(graph);
+      return;
+    }
     if (graph.kind === "object-method") {
       layoutObjectMethodGraph(graph);
       return;
@@ -637,6 +761,100 @@
       }
       y += 18;
     });
+  }
+
+  function layoutObjectOverviewGraph(graph) {
+    var itemsById = {};
+    graph.items.forEach(function (item) {
+      item.w = nodeWidth(item);
+      item.h = nodeHeight(item);
+      itemsById[item.id] = item;
+    });
+
+    var canvasRect = canvas.getBoundingClientRect();
+    var available = Math.max(420, (canvasRect.width || 900) - 2 * MARGIN);
+    var groupGap = 28;
+    graph.groups.forEach(function (methodGroup) {
+      var groupItems = methodGroup.itemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
+      methodGroup.items = groupItems;
+      if (!groupItems.length) {
+        methodGroup.width = Math.min(320, available);
+        methodGroup.height = 92;
+        return;
+      }
+
+      var maxWidth = groupItems.reduce(function (width, item) { return Math.max(width, item.w); }, 164);
+      var innerColumns = groupItems.length > 3 && available >= 760 ? 2 : 1;
+      var maxGroupWidth = Math.max(280, Math.min(620, available));
+      while (innerColumns > 1 && innerColumns * maxWidth + (innerColumns - 1) * 22 + 40 > maxGroupWidth) {
+        innerColumns -= 1;
+      }
+      var layers = methodGroupLayers(methodGroup, graph.edges);
+      var localY = 46;
+      layers.forEach(function (layerInfo) {
+        var row = layerInfo.ids.map(function (id) { return itemsById[id]; }).filter(Boolean).sort(compareMethodItems);
+        for (var start = 0; start < row.length; start += innerColumns) {
+          var chunk = row.slice(start, start + innerColumns);
+          var contentWidth = chunk.reduce(function (sum, item) { return sum + item.w; }, 0) + (chunk.length - 1) * 22;
+          var localX = -contentWidth / 2;
+          chunk.forEach(function (item) {
+            item.localX = localX + item.w / 2;
+            item.localY = localY + item.h / 2;
+            item.layer = layerInfo.index;
+            localX += item.w + 22;
+          });
+          localY += NODE_H + 30;
+        }
+      });
+      var usedWidth = Math.max.apply(null, groupItems.map(function (item) {
+        return Math.abs(item.localX) * 2 + item.w;
+      }));
+      methodGroup.width = Math.min(available, Math.max(280, usedWidth + 40));
+      methodGroup.height = localY + 2;
+    });
+
+    var leftEdge = -available / 2;
+    graph.leftEdge = leftEdge;
+    var cursorX = leftEdge;
+    var cursorY = 0;
+    var rowHeight = 0;
+    graph.groups.forEach(function (methodGroup) {
+      if (cursorX > leftEdge && cursorX + methodGroup.width > available / 2) {
+        cursorX = leftEdge;
+        cursorY += rowHeight + groupGap;
+        rowHeight = 0;
+      }
+      methodGroup.left = cursorX;
+      methodGroup.top = cursorY;
+      methodGroup.bottom = cursorY + methodGroup.height;
+      methodGroup.headerY = cursorY + 25;
+      methodGroup.items.forEach(function (item) {
+        item.cx = cursorX + methodGroup.width / 2 + item.localX;
+        item.cy = cursorY + item.localY;
+      });
+      cursorX += methodGroup.width + groupGap;
+      rowHeight = Math.max(rowHeight, methodGroup.height);
+    });
+
+    var freeItems = graph.freeItemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
+    graph.freeTop = graph.groups.length ? cursorY + rowHeight + 58 : 18;
+    graph.freeHeaderY = graph.freeTop;
+    var freeY = graph.freeTop + 30;
+    var maxFreeWidth = freeItems.reduce(function (width, item) { return Math.max(width, item.w); }, 164);
+    var freeColumns = Math.max(1, Math.min(4, Math.floor((available + 28) / (maxFreeWidth + 28))));
+    for (var freeStart = 0; freeStart < freeItems.length; freeStart += freeColumns) {
+      var freeRow = freeItems.slice(freeStart, freeStart + freeColumns);
+      var freeWidth = freeRow.reduce(function (sum, item) { return sum + item.w; }, 0) + (freeRow.length - 1) * 28;
+      var freeX = -freeWidth / 2;
+      freeRow.forEach(function (item) {
+        item.cx = freeX + item.w / 2;
+        item.cy = freeY + item.h / 2;
+        item.layer = Math.floor(freeStart / freeColumns);
+        freeX += item.w + 28;
+      });
+      freeY += NODE_H + 34;
+    }
+    graph.freeBottom = freeItems.length ? freeY - 34 : graph.freeTop;
   }
 
   function layoutObjectMethodGraph(graph) {
@@ -800,6 +1018,98 @@
     return left.node.line_start - right.node.line_start || left.label.localeCompare(right.label);
   }
 
+  // A short, constrained force settle gives the map a physical feel without
+  // letting methods escape their class compartments or making the layout
+  // wander between visits.
+  function relaxGraphLayout(graph, animate) {
+    graph.animateGravity = false;
+    if ((graph.kind !== "function" && graph.kind !== "object-overview") ||
+        graph.items.length < 2 || graph.items.length > 90) return;
+
+    var byId = {};
+    var groupById = {};
+    (graph.groups || []).forEach(function (methodGroup) { groupById[methodGroup.id] = methodGroup; });
+    graph.items.forEach(function (item) {
+      item.homeX = item.cx;
+      item.homeY = item.cy;
+      byId[item.id] = item;
+    });
+    var links = graph.edges.concat(graph.stateLinks || []);
+
+    for (var iteration = 0; iteration < 18; iteration += 1) {
+      var forces = {};
+      graph.items.forEach(function (item) {
+        forces[item.id] = {
+          x: (item.homeX - item.cx) * 0.11,
+          y: (item.homeY - item.cy) * 0.11,
+        };
+      });
+
+      links.forEach(function (link) {
+        var source = byId[link.source], target = byId[link.target];
+        if (!source || !target) return;
+        var dx = target.cx - source.cx;
+        var dy = target.cy - source.cy;
+        var distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        var sameZone = (source.objectId || "outside") === (target.objectId || "outside");
+        var strength = sameZone ? 0.014 : 0.0025;
+        var pull = Math.max(-2.2, Math.min(2.2, (distance - 158) * strength));
+        var fx = dx / distance * pull;
+        var fy = dy / distance * pull;
+        forces[source.id].x += fx;
+        forces[source.id].y += fy;
+        forces[target.id].x -= fx;
+        forces[target.id].y -= fy;
+      });
+
+      for (var leftIndex = 0; leftIndex < graph.items.length; leftIndex += 1) {
+        var left = graph.items[leftIndex];
+        for (var rightIndex = leftIndex + 1; rightIndex < graph.items.length; rightIndex += 1) {
+          var right = graph.items[rightIndex];
+          if ((left.objectId || "outside") !== (right.objectId || "outside")) continue;
+          var pairX = right.cx - left.cx || 0.01;
+          var pairY = right.cy - left.cy || 0.01;
+          var overlapX = (left.w + right.w) / 2 + 18 - Math.abs(pairX);
+          var overlapY = (left.h + right.h) / 2 + 16 - Math.abs(pairY);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+          if (overlapX < overlapY) {
+            var pushX = Math.min(3, overlapX * 0.16) * (pairX < 0 ? -1 : 1);
+            forces[left.id].x -= pushX;
+            forces[right.id].x += pushX;
+          } else {
+            var pushY = Math.min(3, overlapY * 0.16) * (pairY < 0 ? -1 : 1);
+            forces[left.id].y -= pushY;
+            forces[right.id].y += pushY;
+          }
+        }
+      }
+
+      graph.items.forEach(function (item) {
+        var force = forces[item.id];
+        var xLimit = item.objectId ? 20 : 62;
+        var yLimit = item.objectId ? 12 : 30;
+        item.cx = Math.max(item.homeX - xLimit, Math.min(item.homeX + xLimit, item.cx + Math.max(-5, Math.min(5, force.x))));
+        item.cy = Math.max(item.homeY - yLimit, Math.min(item.homeY + yLimit, item.cy + Math.max(-5, Math.min(5, force.y))));
+        var methodGroup = item.objectId && groupById[item.objectId];
+        if (methodGroup) {
+          item.cx = Math.max(methodGroup.left + item.w / 2 + 14, Math.min(methodGroup.left + methodGroup.width - item.w / 2 - 14, item.cx));
+          item.cy = Math.max(methodGroup.top + 42 + item.h / 2, Math.min(methodGroup.bottom - item.h / 2 - 14, item.cy));
+        } else if (graph.kind === "object-overview") {
+          item.cy = Math.max(graph.freeTop + 26, item.cy);
+        }
+      });
+    }
+
+    var movement = 0;
+    graph.items.forEach(function (item) {
+      item.gravityFromX = item.homeX;
+      item.gravityFromY = item.homeY;
+      movement = Math.max(movement, Math.abs(item.cx - item.homeX) + Math.abs(item.cy - item.homeY));
+    });
+    var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    graph.animateGravity = !!animate && movement > 1 && !reducedMotion;
+  }
+
   // --- draw ---------------------------------------------------------------
 
   function rerender() {
@@ -821,12 +1131,29 @@
     renderCrumbs();
     renderTools();
     var graph = currentGraph();
+    var topologyKey = graphTopologyKey(graph);
+    var topologyChanged = topologyKey !== lastTopologyKey;
     layout(graph);
-    fitView(graph);
+    relaxGraphLayout(graph, topologyChanged);
+    if (topologyChanged) fitView(graph);
     draw(graph);
+    lastTopologyKey = topologyKey;
+  }
+
+  function graphTopologyKey(graph) {
+    return [
+      state.scope,
+      state.mode,
+      state.traceStart || "",
+      state.traceEnd || "",
+      graph.kind,
+      graph.items.map(function (item) { return item.id; }).sort().join(","),
+      graph.edges.map(function (edgeInfo) { return edgeInfo.source + ">" + edgeInfo.target; }).sort().join(","),
+    ].join("|");
   }
 
   function draw(graph) {
+    stopGraphMotion(false);
     while (canvas.firstChild) canvas.removeChild(canvas.firstChild);
     var root = el("g");
     root.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
@@ -839,13 +1166,14 @@
       return;
     }
 
-    // Object focus switches to a graph of that object's methods. The object
-    // id is not a node in that graph, so it must not dim every method.
-    var selectionIsVisible = graph.items.some(function (item) { return item.id === state.graphSelection; });
-    var lit = graph.kind !== "trace" && state.graphSelection && selectionIsVisible ? litSet(graph) : null;
+    // Selection is expressed with rings and semantic edge colour. The rest of
+    // the system stays fully legible instead of fading into the background.
+    var lit = null;
     var center = graph.center || null;
     var groupLayer = el("g"), edgeLayer = el("g"), nodeLayer = el("g");
+    var motionNodes = {}, motionEdges = [];
     root.appendChild(groupLayer); root.appendChild(edgeLayer); root.appendChild(nodeLayer);
+    if (graph.kind === "object-overview") drawObjectOverviewGroups(groupLayer, graph);
     if (graph.kind === "object-method") drawObjectMethodGroups(groupLayer, graph);
     if (graph.kind === "trace") drawTraceCompartments(groupLayer, graph);
     var pos = {};
@@ -860,33 +1188,153 @@
         return;
       }
       var base = e.relation === "extends" ? "edge extends-edge" : "edge";
-      if (graph.kind === "trace") base += e.inTrace ? " trace-edge" : " trace-context-edge";
+      if (graph.traceActive || graph.kind === "trace") base += e.inTrace ? " trace-edge" : " trace-context-edge";
       var path = edge(a, b, base + (e.mutual ? " mutual" : "") + (on ? "" : " muted"), e.weight);
-      if (graph.kind === "trace") bindTraceEdge(path, e);
-      else if (graph.kind === "function") bindGraphPromptEdge(path, e);
+      if ((graph.traceActive || graph.kind === "trace") && e.inTrace) bindTraceEdge(path, e);
+      else if (graph.kind === "function" || graph.kind === "object-overview") bindGraphPromptEdge(path, e);
       edgeLayer.appendChild(path);
+      motionEdges.push({ element: path, source: a, target: b, kind: "call" });
     });
     (graph.stateLinks || []).forEach(function (link) {
       var a = pos[link.source], b = pos[link.target];
       if (!a || !b) return;
       var on = !lit || (lit[link.source] && lit[link.target]);
-      edgeLayer.appendChild(stateEdge(a, b, link, on));
+      var stateGroup = stateEdge(a, b, link, on);
+      edgeLayer.appendChild(stateGroup);
+      motionEdges.push({
+        element: stateGroup.motionPath,
+        label: stateGroup.motionLabel,
+        source: a,
+        target: b,
+        kind: "state",
+      });
     });
     (graph.clones || []).forEach(function (c) {
       var a = pos[c.source], b = pos[c.target];
-      if (a && b) edgeLayer.appendChild(edge(a, b, "clone-edge", 1));
-    });
-    graph.items.forEach(function (it) {
-      if (it.kind === "group") {
-        nodeLayer.appendChild(groupBox(it, !lit || lit[it.id]));
-      } else if (it.kind === "file") {
-        nodeLayer.appendChild(fileBox(it, !lit || lit[it.id], edgeLayer));
-      } else if (it.kind === "object") {
-        nodeLayer.appendChild(objectBox(it, !lit || lit[it.id]));
-      } else {
-        nodeLayer.appendChild(fnBox(it, !lit || lit[it.id], center));
+      if (a && b) {
+        var path = edge(a, b, "clone-edge", 1);
+        edgeLayer.appendChild(path);
+        motionEdges.push({ element: path, source: a, target: b, kind: "call" });
       }
     });
+    graph.items.forEach(function (it) {
+      var element;
+      if (it.kind === "group") {
+        element = groupBox(it, !lit || lit[it.id]);
+      } else if (it.kind === "file") {
+        element = fileBox(it, !lit || lit[it.id], edgeLayer);
+      } else if (it.kind === "object") {
+        element = objectBox(it, !lit || lit[it.id]);
+      } else {
+        element = fnBox(it, !lit || lit[it.id], center);
+      }
+      nodeLayer.appendChild(element);
+      motionNodes[it.id] = element;
+    });
+    animateGravitySettle(graph, motionNodes, motionEdges);
+  }
+
+  function stopGraphMotion(finish) {
+    if (graphLayoutFrame !== null) cancelAnimationFrame(graphLayoutFrame);
+    var complete = finishGraphMotion;
+    graphLayoutFrame = null;
+    finishGraphMotion = null;
+    if (finish && complete) complete();
+  }
+
+  function animateGravitySettle(graph, nodes, edges) {
+    if (!graph.animateGravity) return;
+    var startedAt = performance.now();
+    var duration = 460;
+
+    function renderFrame(progress) {
+      var eased = progress >= 1 ? 1 : 1 - (1 + 7 * progress) * Math.exp(-7 * progress);
+      var positions = {};
+      graph.items.forEach(function (item) {
+        var x = item.gravityFromX + (item.cx - item.gravityFromX) * eased;
+        var y = item.gravityFromY + (item.cy - item.gravityFromY) * eased;
+        positions[item.id] = {
+          cx: x,
+          cy: y,
+          w: item.w,
+          h: item.h,
+          layer: item.layer,
+        };
+        if (nodes[item.id]) {
+          nodes[item.id].setAttribute("transform", "translate(" + (x - item.w / 2) + "," + (y - item.h / 2) + ")");
+        }
+      });
+      edges.forEach(function (motionEdge) {
+        var source = positions[motionEdge.source.id];
+        var target = positions[motionEdge.target.id];
+        if (!source || !target) return;
+        motionEdge.element.setAttribute("d", motionEdge.kind === "state"
+          ? stateEdgePath(source, target)
+          : edgePath(source, target));
+        if (motionEdge.label) {
+          var labelPosition = stateEdgeLabelPosition(source, target);
+          motionEdge.label.setAttribute("x", labelPosition.x);
+          motionEdge.label.setAttribute("y", labelPosition.y);
+        }
+      });
+    }
+
+    finishGraphMotion = function () { renderFrame(1); };
+    renderFrame(0);
+    function step(now) {
+      var progress = Math.min(1, (now - startedAt) / duration);
+      renderFrame(progress);
+      if (progress < 1) {
+        graphLayoutFrame = requestAnimationFrame(step);
+      } else {
+        graphLayoutFrame = null;
+        finishGraphMotion = null;
+      }
+    }
+    graphLayoutFrame = requestAnimationFrame(step);
+  }
+
+  function drawObjectOverviewGroups(layer, graph) {
+    graph.groups.forEach(function (methodGroup) {
+      var background = rect(methodGroup.width, methodGroup.height, "object-compartment-box");
+      background.setAttribute("x", methodGroup.left);
+      background.setAttribute("y", methodGroup.top);
+      if (state.graphSelectionType === "object" && state.graphSelection === methodGroup.id) {
+        background.classList.add("selected");
+      }
+      layer.appendChild(background);
+      var titlePrefix = methodGroup.traceContext ? "TRACE CLASS / " : "CLASS / ";
+      var titleSpace = methodGroup.traceContext ? 154 : 126;
+      var title = text(
+        methodGroup.left + 14,
+        methodGroup.headerY,
+        "object-compartment-title",
+        titlePrefix + truncate(methodGroup.label, Math.max(10, Math.floor((methodGroup.width - titleSpace) / 6.3)))
+      );
+      title.setAttribute("data-object-focus", methodGroup.id);
+      makeSvgButton(title, "Inspect class " + methodGroup.label, function (event) {
+        event.stopPropagation();
+        selectObject(methodGroup.id);
+      });
+      layer.appendChild(title);
+      var countLabel = methodGroup.traceContext
+        ? methodGroup.itemIds.length + " SHOWN"
+        : methodGroup.itemIds.length + (methodGroup.itemIds.length === 1 ? " METHOD" : " METHODS");
+      var count = text(
+        methodGroup.left + methodGroup.width - 14,
+        methodGroup.headerY,
+        "object-compartment-count",
+        countLabel
+      );
+      count.setAttribute("text-anchor", "end");
+      layer.appendChild(count);
+      if (!methodGroup.itemIds.length) {
+        layer.appendChild(text(methodGroup.left + 14, methodGroup.top + 58, "object-compartment-empty", "NO ANALYZED METHODS"));
+      }
+    });
+    if (graph.freeItemIds.length) {
+      layer.appendChild(text(graph.leftEdge, graph.freeHeaderY, "outside-functions-title", "OUTSIDE FUNCTIONS / ORPHANS"));
+    }
   }
 
   function drawObjectMethodGroups(layer, graph) {
@@ -1090,29 +1538,16 @@
     g.appendChild(text(10, 33, "node-meta", roleLabel(node)));
     makeSvgButton(g, "Inspect function " + (node.qualified_name || node.name), function (event) {
       event.stopPropagation();
-      if (event.shiftKey && !state.objectFocus) {
+      if (event.shiftKey) {
         selectTraceEndpoint(node.id);
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && !state.objectFocus) {
+      if (event.metaKey || event.ctrlKey) {
         toggleGraphPromptSelection(node.id);
         return;
       }
-      if (state.objectFocus) selectObjectMethod(state.objectFocus, node.id);
-      else selectFunction(node.id);
+      selectFunction(node.id);
     });
-    if (isConnectedToSelected(node.id)) {
-      g.addEventListener("pointerenter", function () {
-        state.hovered = node.id;
-        renderDetail();
-      });
-      g.addEventListener("pointerleave", function () {
-        if (state.hovered === node.id) {
-          state.hovered = null;
-          renderDetail();
-        }
-      });
-    }
     return g;
   }
 
@@ -1230,6 +1665,18 @@
 
   function edge(a, b, cls, weight) {
     var p = el("path");
+    p.setAttribute("d", edgePath(a, b));
+    p.setAttribute("class", cls);
+    if (cls.indexOf("clone") === -1) {
+      p.setAttribute("marker-end", cls.indexOf("trace-edge") >= 0
+        ? "url(#arrow-trace)"
+        : cls.indexOf("mutual") >= 0 ? "url(#arrow-red)" : "url(#arrow)");
+      if (weight > 1) p.setAttribute("stroke-width", Math.min(1.2 + weight * 0.35, 4));
+    }
+    return p;
+  }
+
+  function edgePath(a, b) {
     var ah = a.h || NODE_H;
     var bh = b.h || NODE_H;
     var x1 = a.cx, y1 = a.cy + ah / 2, x2 = b.cx, y2 = b.cy - bh / 2;
@@ -1250,34 +1697,40 @@
       var midY = (y1 + y2) / 2;
       d = "M" + x1 + "," + y1 + " C" + x1 + "," + midY + " " + x2 + "," + midY + " " + x2 + "," + y2;
     }
-    p.setAttribute("d", d);
-    p.setAttribute("class", cls);
-    if (cls.indexOf("clone") === -1) {
-      p.setAttribute("marker-end", cls.indexOf("trace-edge") >= 0
-        ? "url(#arrow-trace)"
-        : cls.indexOf("mutual") >= 0 ? "url(#arrow-red)" : "url(#arrow)");
-      if (weight > 1) p.setAttribute("stroke-width", Math.min(1.2 + weight * 0.35, 4));
-    }
-    return p;
+    return d;
   }
 
   function stateEdge(a, b, link, on) {
     var p = el("path");
+    p.setAttribute("d", stateEdgePath(a, b));
+    p.setAttribute("class", "edge state-edge" + (on ? "" : " muted"));
+    p.setAttribute("data-state-fields", link.fields.join(", "));
+    var labelPosition = stateEdgeLabelPosition(a, b);
+    var label = text(labelPosition.x, labelPosition.y, "state-edge-label" + (on ? "" : " muted"), "state: " + link.fields.join(", "));
+    var groupNode = el("g");
+    groupNode.appendChild(p);
+    groupNode.appendChild(label);
+    groupNode.motionPath = p;
+    groupNode.motionLabel = label;
+    return groupNode;
+  }
+
+  function stateEdgePath(a, b) {
     var y1 = a.cy + (a.h || NODE_H) / 2;
     var y2 = b.cy - (b.h || NODE_H) / 2;
     var side = a.cx <= b.cx ? -1 : 1;
     var bow = 54;
-    p.setAttribute("d", "M" + a.cx + "," + y1 +
+    return "M" + a.cx + "," + y1 +
       " C" + (a.cx + side * bow) + "," + (y1 + 24) +
       " " + (b.cx + side * bow) + "," + (y2 - 24) +
-      " " + b.cx + "," + y2);
-    p.setAttribute("class", "edge state-edge" + (on ? "" : " muted"));
-    p.setAttribute("data-state-fields", link.fields.join(", "));
-    var label = text((a.cx + b.cx) / 2 + side * bow, (y1 + y2) / 2 - 4, "state-edge-label" + (on ? "" : " muted"), "state: " + link.fields.join(", "));
-    var groupNode = el("g");
-    groupNode.appendChild(p);
-    groupNode.appendChild(label);
-    return groupNode;
+      " " + b.cx + "," + y2;
+  }
+
+  function stateEdgeLabelPosition(a, b) {
+    var y1 = a.cy + (a.h || NODE_H) / 2;
+    var y2 = b.cy - (b.h || NODE_H) / 2;
+    var side = a.cx <= b.cx ? -1 : 1;
+    return { x: (a.cx + b.cx) / 2 + side * 54, y: (y1 + y2) / 2 - 4 };
   }
 
   // --- breadcrumb + tools -------------------------------------------------
@@ -1314,7 +1767,9 @@
     }
     var scopedNode = treeByPath[state.scope] || tree;
     var objectModeAvailable = scopeObjects(scopedNode).length > 0;
-    var label = graph.kind === "trace" ? "trace nodes" : graph.kind === "object" ? "objects" : scopedNode.type === "module" ? "functions" : "files";
+    var label = "files";
+    if (graph.kind === "object") label = "objects";
+    if (graph.kind === "function" || graph.kind === "object-overview") label = "visible functions";
     var focusAvailable = !!state.focus || (state.graphSelectionType === "function" && !!nodeById[state.graphSelection]);
     document.getElementById("tools").innerHTML =
       '<span class="count">' + graph.items.length + " " + label + "</span>" +
@@ -1341,11 +1796,11 @@
       rerender();
     });
     bindGraphPromptToolbar(graph);
-    document.getElementById("hint").textContent = graph.kind === "trace"
-      ? "TRACE ACTIVE / Shift-click a function to set the target / drag to pan / scroll to zoom"
+    document.getElementById("hint").textContent = graph.traceActive
+      ? "TRACE ACTIVE / all scoped functions remain visible / Shift-click a target / drag to pan / scroll to zoom"
       : state.mode === "objects"
-        ? "drag to pan · scroll or use +/− to zoom · click an object or method"
-        : "drag to pan · scroll or use +/− to zoom · click a function to highlight neighbors · Shift-click to trace · ⌘/Ctrl-click to select for a prompt";
+        ? "drag to pan · scroll or use +/− to zoom · click a method to trace from it · click empty space to clear"
+        : "drag to pan · scroll or use +/− to zoom · click a function to trace from it · Shift-click to set a target · click empty space to clear";
   }
 
   function renderObjectMethodTools(graph) {
@@ -1368,7 +1823,7 @@
   }
 
   function graphPromptTools(graph) {
-    if (graph.kind !== "function" || state.graphPromptSelection.length < 2) return "";
+    if ((graph.kind !== "function" && graph.kind !== "object-overview") || state.graphPromptSelection.length < 2) return "";
     var pipeline = graphPromptPipelineOrder(state.graphPromptSelection, graph.edges);
     return '<div class="graph-prompt-tools" role="group" aria-label="Graph prompt selection">' +
       '<span class="graph-prompt-count">' + state.graphPromptSelection.length + " selected</span>" +
@@ -2351,46 +2806,44 @@
     state.focus = null;
     state.graphSelection = null;
     state.graphSelectionType = null;
+    state.detailSelection = null;
+    state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
     var scopedNode = treeByPath[path] || tree;
-    if (!scopeObjects(scopedNode).length) state.mode = "functions";
+    state.mode = objectDominated(scopedNode) ? "objects" : "functions";
     expandTo(path);
     renderTree();
     rerender();
   }
 
   function selectFunction(id) {
-    if (state.disabled[id]) return;
-    clearGraphPromptState();
-    state.graphSelection = id;
-    state.workspace = "graph";
-    state.graphSelectionType = "function";
-    state.detailSelection = { type: "function", id: id };
-    state.objectFocus = null;
-    state.hovered = null;
-    state.focus = null;
-    state.mode = "functions";
-    state.scope = moduleOf(id);
-    expandTo(moduleOf(id));
-    renderTree();
-    rerender();
+    startTrace(id);
   }
 
   function startTrace(id) {
     if (!activeTraceFunction(id)) return;
+    if (state.traceStart === id && state.graphSelection === id && detailIsFunction(id)) {
+      clearGraphSelection();
+      return;
+    }
+    var preferObjects = state.mode === "objects";
+    var modulePath = moduleOf(id);
+    var moduleNode = treeByPath[modulePath] || tree;
     clearGraphPromptState();
     state.traceStart = id;
     state.traceEnd = null;
     state.workspace = "graph";
-    state.mode = "functions";
+    state.mode = (preferObjects && scopeObjects(moduleNode).length) || objectDominated(moduleNode)
+      ? "objects"
+      : "functions";
     state.focus = null;
     state.objectFocus = null;
     state.graphSelection = id;
     state.graphSelectionType = "function";
     state.detailSelection = { type: "function", id: id };
     state.hovered = null;
-    state.scope = moduleOf(id);
+    state.scope = modulePath;
     expandTo(state.scope);
     rerender();
   }
@@ -2403,7 +2856,6 @@
     }
     state.traceEnd = id;
     state.workspace = "graph";
-    state.mode = "functions";
     state.focus = null;
     state.objectFocus = null;
     state.graphSelection = id;
@@ -2425,8 +2877,7 @@
   }
 
   function clearTrace() {
-    clearTraceState();
-    rerender();
+    clearGraphSelection();
   }
 
   function clearTraceState() {
@@ -2473,6 +2924,8 @@
     state.focus = null;
     state.graphSelection = null;
     state.graphSelectionType = null;
+    state.detailSelection = null;
+    state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
     expandTo(tree.path);
@@ -2490,13 +2943,6 @@
     rerender();
   }
 
-  function setTheme(theme) {
-    state.theme = theme;
-    document.documentElement.setAttribute("data-theme", theme);
-    try { localStorage.setItem("atlas-theme", theme); } catch (error) { /* session-only theme */ }
-    renderThemeToggle();
-  }
-
   function toggleNavigationCollapsed() {
     state.navigationCollapsed = !state.navigationCollapsed;
     renderHead();
@@ -2505,25 +2951,62 @@
 
   function bindToolbarActions() {
     document.getElementById("fullGraph").addEventListener("click", showFullGraph);
-    document.getElementById("themeToggle").addEventListener("click", function () {
-      setTheme(state.theme === "dark" ? "light" : "dark");
-    });
-    renderThemeToggle();
   }
 
-  function renderThemeToggle() {
-    var button = document.getElementById("themeToggle");
-    var nextTheme = state.theme === "dark" ? "light" : "dark";
-    var nextLabel = state.theme === "dark" ? "dim" : "deep";
-    button.setAttribute("aria-pressed", state.theme === "dark");
-    button.setAttribute("aria-label", "Switch to " + nextLabel + " field contrast");
-    button.setAttribute("title", "Switch to " + nextLabel + " field contrast");
-    button.innerHTML = '<span class="theme-icon" aria-hidden="true">' + (state.theme === "dark" ? "◫" : "■") +
-      "</span><span>" + (state.theme === "dark" ? "Dim" : "Deep") + "</span>";
+  function bindDetailResize() {
+    var resize = document.getElementById("detailResize");
+    var shell = document.querySelector(".shell");
+    var panel = document.getElementById("detail");
+    var pointerId = null;
+
+    function panelWidth() {
+      return panel.getBoundingClientRect().width || 672;
+    }
+
+    function setPanelWidth(width) {
+      var shellWidth = shell.getBoundingClientRect().width || window.innerWidth;
+      var sidebarWidth = document.querySelector(".sidebar").getBoundingClientRect().width || 0;
+      var maximum = Math.max(360, shellWidth - sidebarWidth - 360);
+      var next = Math.round(Math.max(360, Math.min(maximum, width)));
+      shell.style.setProperty("--detail-width", next + "px");
+      resize.setAttribute("aria-valuemin", "360");
+      resize.setAttribute("aria-valuemax", String(Math.round(maximum)));
+      resize.setAttribute("aria-valuenow", String(next));
+    }
+
+    resize.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) return;
+      pointerId = event.pointerId;
+      resize.setPointerCapture(pointerId);
+      shell.classList.add("detail-resizing");
+      event.preventDefault();
+    });
+    resize.addEventListener("pointermove", function (event) {
+      if (event.pointerId !== pointerId) return;
+      setPanelWidth(shell.getBoundingClientRect().right - event.clientX);
+    });
+    function stopResize(event) {
+      if (event.pointerId !== pointerId) return;
+      pointerId = null;
+      shell.classList.remove("detail-resizing");
+    }
+    resize.addEventListener("pointerup", stopResize);
+    resize.addEventListener("pointercancel", stopResize);
+    resize.addEventListener("lostpointercapture", function () {
+      pointerId = null;
+      shell.classList.remove("detail-resizing");
+    });
+    resize.addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      setPanelWidth(panelWidth() + (event.key === "ArrowLeft" ? 24 : -24));
+    });
+    resize.addEventListener("dblclick", function () { setPanelWidth(672); });
+    if (!window.matchMedia || window.matchMedia("(min-width: 1121px)").matches) setPanelWidth(panelWidth());
   }
 
   function showFullGraph() {
-    if (state.workspace === "graph" && state.scope === tree.path && !state.focus && !state.graphSelection) return;
+    if (state.workspace === "graph" && state.scope === tree.path && !state.focus && !state.graphSelection && !state.detailSelection && !state.traceStart) return;
     recordNavigation();
     clearGraphPromptState();
     clearTraceState();
@@ -2533,6 +3016,8 @@
     state.focus = null;
     state.graphSelection = null;
     state.graphSelectionType = null;
+    state.detailSelection = null;
+    state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
     rerender();
@@ -2540,19 +3025,23 @@
 
   function selectObject(id) {
     if (!objectById[id]) return;
+    if (state.graphSelectionType === "object" && state.graphSelection === id &&
+        state.detailSelection && state.detailSelection.type === "object" && state.detailSelection.id === id) {
+      clearGraphSelection();
+      return;
+    }
     clearGraphPromptState();
     clearTraceState();
     state.graphSelection = id;
     state.workspace = "graph";
     state.graphSelectionType = "object";
     state.detailSelection = { type: "object", id: id };
-    state.objectFocus = id;
+    state.objectFocus = null;
     state.hovered = null;
     state.focus = null;
     state.mode = "objects";
     var module = objectById[id].module;
-    var inScope = state.scope === "" || module === state.scope || module.indexOf(state.scope + ".") === 0;
-    if (!inScope) state.scope = module;
+    state.scope = module;
     expandTo(module);
     rerender();
   }
@@ -2560,16 +3049,9 @@
   function selectObjectMethod(objectId, methodId) {
     var object = objectById[objectId];
     if (!object || objectMethodIds(object).indexOf(methodId) < 0 || !nodeById[methodId]) return;
-    clearGraphPromptState();
-    state.workspace = "graph";
-    state.graphSelection = methodId;
-    state.graphSelectionType = "function";
-    state.detailSelection = { type: "function", id: methodId };
-    state.objectFocus = objectId;
-    state.hovered = null;
-    state.focus = null;
     state.mode = "objects";
-    rerender();
+    state.scope = object.module;
+    startTrace(methodId);
   }
 
   function backToObjectRelationships() {
@@ -2588,11 +3070,13 @@
 
   function renderDetail() {
     var panel = document.getElementById("detail");
+    var resize = document.getElementById("detailResize");
     var shell = document.querySelector(".shell");
     var selection = state.detailSelection;
     if (!selection) {
       renderedDetailKey = null;
       panel.hidden = true;
+      resize.hidden = true;
       panel.innerHTML = "";
       shell.classList.remove("source-open");
       return;
@@ -2606,6 +3090,7 @@
     renderedDetailKey = detailKey;
 
     panel.hidden = false;
+    resize.hidden = false;
     shell.classList.add("source-open");
     if (selection.type === "object" && objectById[selection.id]) {
       renderObjectDetail(panel, objectById[selection.id]);
@@ -2616,6 +3101,7 @@
       state.detailSelection = null;
       renderedDetailKey = null;
       panel.hidden = true;
+      resize.hidden = true;
       panel.innerHTML = "";
       shell.classList.remove("source-open");
       return;
@@ -2624,48 +3110,13 @@
     var sourceId = selection.id;
     var node = nodeById[sourceId];
     var symbol = symbolById[node.id] || {};
-    var functionInfo = architectureById[node.id];
-    var callers = inAdj[node.id] || [];
-    var callees = outAdj[node.id] || [];
-    var highlight = state.hovered && isConnectedToSelected(state.hovered) ? nodeById[state.hovered] : null;
-    var signature = functionSignature(symbol, node);
     panel.innerHTML =
-      '<div class="detail-head">' +
-        '<h2>' + escape(node.name) + "</h2>" +
-        '<button class="detail-close" aria-label="Close source inspector">×</button>' +
-      "</div>" +
-      '<div class="detail-trace-actions" aria-label="Static trace actions">' +
-        '<button type="button" data-trace-from' + (state.traceStart === node.id ? ' class="active"' : "") + '>Trace from</button>' +
-        '<button type="button" data-trace-to' + (!state.traceStart || state.traceStart === node.id ? " disabled" : "") +
-          (state.traceEnd === node.id ? ' class="active"' : "") + '>Trace to</button>' +
-      "</div>" +
-      quickPromptActions() +
-      (node.load_bearing ? '<span class="detail-tag">' + roleLabel(node) + "</span>" : "") +
-      (node.dead ? '<span class="detail-tag dead">dead code</span>' : "") +
-      (clonePartner[node.id] ? '<span class="detail-tag clone">clone ×' + (clonePartner[node.id].length + 1) + "</span>" : "") +
-      '<p class="detail-doc">' + escape(node.docstring_summary) + "</p>" +
-      (functionInfo && functionInfo.role !== node.docstring_summary
-        ? '<p class="detail-role"><strong>Atlas role:</strong> ' + escape(functionInfo.role) + "</p>"
-        : "") +
-      '<p class="detail-signature"><code>' + escape(signature) + "</code></p>" +
-      "<dl>" +
-        "<dt>module</dt><dd>" + escape(node.module) + "</dd>" +
-        "<dt>location</dt><dd>" + escape(node.file_id + ":" + node.line_start) + "</dd>" +
-        "<dt>inputs</dt><dd>" + escape(functionInputs(symbol)) + "</dd>" +
-        "<dt>output</dt><dd>" + escape(symbol.return_annotation || "not declared") + "</dd>" +
-        "<dt>callers / callees</dt><dd>" + callers.length + " / " + callees.length + "</dd>" +
-        "<dt>status</dt><dd>" + escape(roleLabel(node)) + "</dd>" +
-      "</dl>" +
-      '<h3 class="detail-section-title">Code</h3>' +
-      (highlight ? '<div class="detail-hover">Highlighting references to <strong>' + escape(highlight.name) + "</strong></div>" : "") +
-      sourceBlock(symbol, highlight ? highlight.name : null, {
+      '<button class="detail-close" aria-label="Close source inspector">×</button>' +
+      sourceBlock(symbol, null, {
         symbolId: node.id,
         sourceRange: state.sourceRange,
       });
-    panel.querySelector(".detail-close").addEventListener("click", hideDetail);
-    panel.querySelector("[data-trace-from]").addEventListener("click", function () { startTrace(node.id); });
-    var traceTo = panel.querySelector("[data-trace-to]");
-    if (!traceTo.disabled) traceTo.addEventListener("click", function () { selectTraceEndpoint(node.id); });
+    panel.querySelector(".detail-close").addEventListener("click", clearGraphSelection);
     bindInlinePromptActions(panel, node.id);
     if (detailChanged) focusNewDetail(panel);
   }
@@ -2945,11 +3396,14 @@
     var scope = cityGraphScope(path);
     if (scope === state.scope) return;
     clearGraphPromptState();
+    clearTraceState();
     state.scope = scope;
-    state.mode = "functions";
+    state.mode = objectDominated(treeByPath[scope] || tree) ? "objects" : "functions";
     state.focus = null;
     state.graphSelection = null;
     state.graphSelectionType = null;
+    state.detailSelection = null;
+    state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
   }
@@ -2985,8 +3439,7 @@
   function selectCityCallable(id) {
     if (!nodeById[id]) return;
     recordNavigation();
-    state.detailSelection = { type: "function", id: id };
-    rerender();
+    selectFunction(id);
   }
 
   function formatCount(count, singular) {
@@ -3004,6 +3457,10 @@
   }
 
   function hideDetail() {
+    clearGraphSelection();
+  }
+
+  function clearGraphSelection() {
     var closedSelection = state.detailSelection;
     if (detailFocusFrame !== null) {
       cancelAnimationFrame(detailFocusFrame);
@@ -3011,7 +3468,14 @@
     }
     clearGraphPromptState();
     resetInlinePrompt();
+    clearTraceState();
+    state.graphSelection = null;
+    state.graphSelectionType = null;
     state.detailSelection = null;
+    state.objectFocus = null;
+    state.hovered = null;
+    state.focus = null;
+    state.sourceRange = null;
     rerender();
     var focusTarget = detailReturnFocus && detailReturnFocus !== document.body &&
       detailReturnFocus.isConnected && !detailReturnFocus.closest("[hidden]")
@@ -3034,45 +3498,10 @@
   }
 
   function renderObjectDetail(card, object) {
-    var constructor = object.constructor || { params: [], assigned_fields: [] };
-    var fields = object.fields || [];
-    var collaborators = fields.filter(function (field) { return field.collaborator_kind; });
-    var methodRows = (object.field_access || []).map(function (access) {
-      var method = nodeById[access.method_id];
-      if (!method) return "";
-      var calls = (access.collaborator_calls || []).map(function (call) {
-        return call.field + "." + call.method + "()";
-      }).join(", ");
-      return "<tr><td><button type=\"button\" class=\"object-method-link\" data-object-method=\"" + escapeAttr(access.method_id) + "\">" + escape(method.name) + "</button></td><td>" + escape(access.reads.join(", ") || "none") + "</td><td>" + escape(access.writes.join(", ") || "none") + "</td><td>" + escape(calls || "none") + "</td></tr>";
-    }).join("");
     card.innerHTML =
-      '<div class="detail-head">' +
-        '<h2>' + escape(object.name) + "</h2>" +
-        '<button class="detail-close" aria-label="Close object inspector">×</button>' +
-      "</div>" +
-      '<span class="detail-tag">object</span>' +
-      '<p class="detail-doc">' + escape(object.docstring_summary || "No docstring") + "</p>" +
-      "<dl>" +
-        "<dt>module</dt><dd>" + escape(object.module) + "</dd>" +
-        "<dt>location</dt><dd>" + escape(object.file_id + ":" + object.line_start) + "</dd>" +
-        "<dt>constructor</dt><dd>" + escape(constructor.method_id ? methodSignature(constructor.method_id, constructor.params) : "none") + "</dd>" +
-        "<dt>fields</dt><dd>" + fields.length + "</dd>" +
-      "</dl>" +
-      '<h3 class="detail-section-title">Code</h3>' +
-      sourceBlock(object, null) +
-      '<h3 class="detail-section-title">Fields</h3>' +
-      objectFieldTable(fields) +
-      '<h3 class="detail-section-title">Collaborators</h3>' +
-      objectCollaboratorList(collaborators) +
-      '<h3 class="detail-section-title">Method State Access</h3>' +
-      '<table class="object-detail-table"><thead><tr><th>method</th><th>reads</th><th>writes</th><th>calls</th></tr></thead><tbody>' +
-      (methodRows || '<tr><td colspan="4" class="object-detail-empty">No recorded field access.</td></tr>') + "</tbody></table>";
-    card.querySelector(".detail-close").addEventListener("click", hideDetail);
-    card.querySelectorAll("[data-object-method]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        selectObjectMethod(object.id, button.getAttribute("data-object-method"));
-      });
-    });
+      '<button class="detail-close" aria-label="Close source inspector">×</button>' +
+      sourceBlock(object, null);
+    card.querySelector(".detail-close").addEventListener("click", clearGraphSelection);
   }
 
   function objectFieldTable(fields) {
@@ -3351,13 +3780,14 @@
   // --- view / pan / zoom --------------------------------------------------
 
   function fitView(graph) {
-    if (!graph.items.length) {
+    if (!graph.items.length && !(graph.kind === "object-overview" && graph.groups.length)) {
       if (graph.kind === "object-method") {
         var emptyRect = canvas.getBoundingClientRect();
         view = { x: (emptyRect.width || 900) / 2, y: (emptyRect.height || 700) / 2, scale: 1 };
       } else {
         view = { x: MARGIN, y: MARGIN, scale: 1 };
       }
+      syncViewportTarget();
       return;
     }
     var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -3372,6 +3802,15 @@
         minY = Math.min(minY, methodGroup.top - 16);
         maxY = Math.max(maxY, methodGroup.bottom);
       });
+    }
+    if (graph.kind === "object-overview") {
+      graph.groups.forEach(function (methodGroup) {
+        minX = Math.min(minX, methodGroup.left);
+        maxX = Math.max(maxX, methodGroup.left + methodGroup.width);
+        minY = Math.min(minY, methodGroup.top);
+        maxY = Math.max(maxY, methodGroup.bottom);
+      });
+      if (graph.freeItemIds.length) minY = Math.min(minY, graph.freeHeaderY - 18);
     }
     if (graph.kind === "trace") {
       graph.compartments.forEach(function (compartment) {
@@ -3388,12 +3827,20 @@
     view.x = (w - (maxX + minX) * view.scale) / 2;
     var contentH = (maxY - minY) * view.scale;
     view.y = contentH < h - 2 * MARGIN ? (h - (maxY + minY) * view.scale) / 2 : MARGIN - minY * view.scale;
+    syncViewportTarget();
+  }
+
+  function syncViewportTarget() {
+    viewportTarget.x = view.x;
+    viewportTarget.y = view.y;
+    viewportTarget.scale = view.scale;
   }
 
   function bindPanZoom() {
     var draggingPointer = null, last = null, moved = false;
     canvas.addEventListener("pointerdown", function (event) {
       if (event.button !== 0 || event.target.closest(".node, [role=button]")) return;
+      stopGraphMotion(true);
       draggingPointer = event.pointerId;
       moved = false;
       last = { x: event.clientX, y: event.clientY };
@@ -3404,6 +3851,7 @@
       moved = true;
       view.x += event.clientX - last.x;
       view.y += event.clientY - last.y;
+      syncViewportTarget();
       last = { x: event.clientX, y: event.clientY };
       scheduleGraphTransform();
     });
@@ -3419,13 +3867,14 @@
         clearTemporaryGraphPromptSelection();
         return;
       }
-      if (state.detailSelection) hideDetail();
+      if (state.detailSelection || state.graphSelection || state.traceStart || state.focus) clearGraphSelection();
     });
     canvas.addEventListener("wheel", function (e) {
       e.preventDefault();
       var rect = canvas.getBoundingClientRect();
       var px = e.clientX - rect.left, py = e.clientY - rect.top;
-      zoomAt(px, py, e.deltaY < 0 ? 1.1 : 1 / 1.1);
+      var factor = Math.max(0.88, Math.min(1.14, Math.exp(-e.deltaY * 0.0015)));
+      zoomAt(px, py, factor);
       scheduleGraphTransform();
     }, { passive: false });
   }
@@ -3434,8 +3883,8 @@
     document.addEventListener("keydown", function (event) {
       var tag = event.target && event.target.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (event.key === "Escape" && state.detailSelection) {
-        hideDetail();
+      if (event.key === "Escape" && (state.detailSelection || state.graphSelection || state.traceStart || state.focus)) {
+        clearGraphSelection();
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -3478,10 +3927,10 @@
   }
 
   function zoomAt(px, py, factor) {
-    var next = Math.min(2.5, Math.max(0.12, view.scale * factor));
-    view.x = px - (px - view.x) * (next / view.scale);
-    view.y = py - (py - view.y) * (next / view.scale);
-    view.scale = next;
+    var next = Math.min(2.5, Math.max(0.12, viewportTarget.scale * factor));
+    viewportTarget.x = px - (px - viewportTarget.x) * (next / viewportTarget.scale);
+    viewportTarget.y = py - (py - viewportTarget.y) * (next / viewportTarget.scale);
+    viewportTarget.scale = next;
   }
 
   function zoomLabel() { return Math.round(view.scale * 100) + "%"; }
@@ -3492,20 +3941,39 @@
 
   function scheduleGraphTransform() {
     if (graphTransformFrame !== null) return;
-    graphTransformFrame = requestAnimationFrame(function () {
-      graphTransformFrame = null;
+    function step() {
+      var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var alpha = reducedMotion ? 1 : 0.24;
+      view.x += (viewportTarget.x - view.x) * alpha;
+      view.y += (viewportTarget.y - view.y) * alpha;
+      view.scale += (viewportTarget.scale - view.scale) * alpha;
       if (graphRoot) {
         graphRoot.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
       }
       syncZoomReadout();
-    });
+      var moving = Math.abs(view.x - viewportTarget.x) > 0.05 ||
+        Math.abs(view.y - viewportTarget.y) > 0.05 ||
+        Math.abs(view.scale - viewportTarget.scale) > 0.0002;
+      if (moving) {
+        graphTransformFrame = requestAnimationFrame(step);
+      } else {
+        view.x = viewportTarget.x;
+        view.y = viewportTarget.y;
+        view.scale = viewportTarget.scale;
+        if (graphRoot) graphRoot.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
+        graphTransformFrame = null;
+      }
+    }
+    graphTransformFrame = requestAnimationFrame(step);
   }
 
   function redraw(refit) {
     var graph = currentGraph();
     layout(graph);
+    relaxGraphLayout(graph, false);
     if (refit) fitView(graph);
     draw(graph);
+    lastTopologyKey = graphTopologyKey(graph);
     syncZoomReadout();
   }
 
@@ -3536,6 +4004,16 @@
       (n.children || []).forEach(walk);
     })(node);
     return list.slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+  function objectDominated(node) {
+    if (!node || node.type !== "module") return false;
+    var activeIds = activeFunctionIds(node);
+    var claimed = {};
+    scopeObjects(node).forEach(function (object) {
+      objectMethodIds(object).forEach(function (id) { claimed[id] = true; });
+    });
+    var methodCount = activeIds.filter(function (id) { return claimed[id]; }).length;
+    return methodCount > 0 && methodCount > activeIds.length - methodCount;
   }
   function nodeWidth(it) {
     if (it.kind === "object") return objectCard(it).width;

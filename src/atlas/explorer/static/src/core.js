@@ -25,7 +25,7 @@
   }
 
   function hasLegacyGraphHashState(params) {
-    return ["scope", "mode", "graph", "sel", "focus", "source", "objectFocus"].some(function (key) {
+    return ["scope", "mode", "graph", "sel", "focus", "source", "objectFocus", "traceStart", "traceEnd"].some(function (key) {
       return Object.prototype.hasOwnProperty.call(params, key);
     });
   }
@@ -40,6 +40,8 @@
       parts.push("type=" + state.graphSelectionType);
     }
     if (state.focus) parts.push("focus=" + encodeURIComponent(state.focus));
+    if (state.traceStart) parts.push("traceStart=" + encodeURIComponent(state.traceStart));
+    if (state.traceEnd) parts.push("traceEnd=" + encodeURIComponent(state.traceEnd));
     if (state.cityPath) parts.push("city=" + encodeURIComponent(state.cityPath));
     if (state.mapSelection) {
       parts.push("map=" + encodeURIComponent(state.mapSelection.path));

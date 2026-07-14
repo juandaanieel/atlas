@@ -9,10 +9,7 @@
     <title>Atlas Explorer</title>
     <script>
       (function () {
-        var saved = null;
-        try { saved = localStorage.getItem("atlas-theme"); } catch (error) { /* use the system preference */ }
-        var theme = saved || "dark";
-        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.setAttribute("data-theme", "dark");
       })();
     </script>
     <link rel="stylesheet" href="assets/styles.css?v=__ATLAS_STYLES_VERSION__">
@@ -37,9 +34,6 @@
           <div id="crumbs" class="crumbs"></div>
           <div class="toolbar-actions">
             <button id="fullGraph" class="toolbar-action" title="Open the complete system field">System field</button>
-            <button id="themeToggle" class="theme-toggle" aria-pressed="false" aria-label="Toggle color theme" title="Toggle color theme">
-              <span class="theme-icon" aria-hidden="true">◐</span><span>Theme</span>
-            </button>
           </div>
           <div id="tools" class="tools"></div>
         </div>
@@ -49,6 +43,7 @@
         <section id="tabContent" class="tab-content" hidden></section>
         <div class="hint" id="hint"></div>
       </main>
+      <div id="detailResize" class="detail-resize" role="separator" aria-label="Resize code panel" aria-orientation="vertical" tabindex="0" hidden></div>
       <aside id="detail" class="detail-panel" aria-label="Code details" tabindex="-1" hidden></aside>
     </div>
     <script src="assets/src/core.js?v=__ATLAS_CORE_VERSION__"></script>
