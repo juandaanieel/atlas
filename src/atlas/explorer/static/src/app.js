@@ -1,9 +1,8 @@
 // Atlas explorer. The Python analyzer is the single source of truth: it ships a
 // fully classified model — functions, edges, defects, and a package/module tree
-// with rolled-up defect counts. This file never classifies anything. It scopes
-// the model to one place at a time so the graph never becomes a hairball, lays
-// that scope out, and draws it. Defects live in colour and line style, never in
-// a number printed inside a box.
+// with rolled-up defect counts. This file derives only presentation facts from
+// that payload, scopes stable file/function/object views, lays each topology out
+// deterministically, and draws it. Selection only changes emphasis.
 
 (function () {
   "use strict";
@@ -12,7 +11,6 @@
   if (!core) throw new Error("AtlasCore must be loaded before app.js");
 
   var SVGNS = "http://www.w3.org/2000/svg";
-  var COL = 220;
   var ROW = 110;
   var NODE_H = 44;
   var MARGIN = 52;
@@ -30,17 +28,40 @@
   model.nodes.forEach(function (n) { nodeById[n.id] = n; });
   var symbolById = {};
   payload.symbols.forEach(function (s) { symbolById[s.id] = s; });
+  var exampleModules = {};
+  var internalFunctions = {};
+  payload.symbols.forEach(function (symbol) {
+    if (symbol.kind !== "function" || symbol.class_id) return;
+    internalFunctions[symbol.id] = true;
+    if (symbol.name === "main") exampleModules[symbol.module] = true;
+  });
+  var nonTestModules = {};
+  (payload.files || []).forEach(function (file) {
+    if (!file.is_test) nonTestModules[file.module] = true;
+  });
+  var importedFunctionsByModule = {};
+  (payload.imports || []).forEach(function (importInfo) {
+    if (importInfo.kind !== "from" || importInfo.name === "*" || !nonTestModules[importInfo.module]) return;
+    var base = resolveImportBase(importInfo.module, importInfo.imported_module, importInfo.level);
+    var target = base ? base + "." + importInfo.name : importInfo.name;
+    if (!internalFunctions[target]) return;
+    (importedFunctionsByModule[importInfo.module] = importedFunctionsByModule[importInfo.module] || {})[target] = true;
+  });
+  var orchestratorModules = {};
+  var maximumImportedFunctions = Object.keys(importedFunctionsByModule).reduce(function (maximum, modulePath) {
+    return Math.max(maximum, Object.keys(importedFunctionsByModule[modulePath]).length);
+  }, 0);
+  Object.keys(importedFunctionsByModule).forEach(function (modulePath) {
+    if (Object.keys(importedFunctionsByModule[modulePath]).length === maximumImportedFunctions) {
+      orchestratorModules[modulePath] = maximumImportedFunctions;
+    }
+  });
   var objects = payload.objects || [];
   var objectById = {};
   var objectsByModule = {};
-  var methodObjectById = {};
   objects.forEach(function (o) {
     objectById[o.id] = o;
     (objectsByModule[o.module] = objectsByModule[o.module] || []).push(o);
-    var methodIds = [];
-    if (o.constructor && o.constructor.method_id) methodIds.push(o.constructor.method_id);
-    methodIds = methodIds.concat((o.methods && o.methods.public) || [], (o.methods && o.methods.private) || []);
-    methodIds.forEach(function (id) { methodObjectById[id] = o.id; });
   });
   var architecture = payload.architecture || { functions: [], pipelines: [], use_cases: [], functionalities: [] };
   var architectureById = {};
@@ -51,18 +72,14 @@
     (outAdj[e.source] = outAdj[e.source] || []).push(e.target);
     (inAdj[e.target] = inAdj[e.target] || []).push(e.source);
   });
+  var callPaths = buildCallPaths(model.edges);
+  var callPathIndexByEdge = callPaths.colorByEdge;
+  var callPathIdByEdge = callPaths.idByEdge;
   var callByEdge = {};
   (payload.calls || []).forEach(function (call) {
     if (!call.resolved || !call.target) return;
     var key = call.source + ">" + call.target;
     if (!callByEdge[key] || call.line < callByEdge[key].line) callByEdge[key] = call;
-  });
-
-  var clonePartner = {};
-  model.clones.forEach(function (group) {
-    group.members.forEach(function (a) {
-      clonePartner[a] = group.members.filter(function (b) { return b !== a; });
-    });
   });
 
   var treeByPath = {};
@@ -77,6 +94,7 @@
     sidebarTab: "pages",
     scope: tree.path,           // path of the package/module currently scoped
     mode: "functions",
+    globalView: "files",
     focus: null,                // a function id when in neighborhood mode
     graphSelection: null,
     graphSelectionType: null,
@@ -109,16 +127,10 @@
     lastFunctionClick: null,
   };
   var view = { x: MARGIN, y: MARGIN, scale: 1 };
-  var viewportTarget = { x: MARGIN, y: MARGIN, scale: 1 };
   var graphRoot = null;
-  var graphTransformFrame = null;
-  var graphLayoutFrame = null;
-  var finishGraphMotion = null;
-  var graphResizeFrame = null;
   var lastTopologyKey = null;
   var renderedDetailKey = null;
   var detailReturnFocus = null;
-  var detailFocusFrame = null;
   var navigation = { back: [], forward: [] };
 
   var canvas = document.getElementById("canvas");
@@ -139,13 +151,11 @@
 
   readHash();
   renderHead();
-  bindToolbarActions();
   bindDetailResize();
   renderViews();
   renderNavigationSurface();
   rerender();
   bindPanZoom();
-  bindGraphResize();
   bindKeyboardShortcuts();
 
   // --- deep links -----------------------------------------------------------
@@ -157,7 +167,8 @@
       state.scope = params.scope;
       expandTo(params.scope);
     }
-    if (params.mode === "objects") state.mode = "objects";
+    if (params.mode === "functions" || params.mode === "objects" || params.mode === "global") state.mode = params.mode;
+    if (params.globalView === "pipelines") state.globalView = "pipelines";
     var requestedWorkspace = params.workspace || params.tab;
     var hasExplicitWorkspace = isWorkspace(requestedWorkspace);
     if (hasExplicitWorkspace) {
@@ -170,11 +181,14 @@
     if (params.nav === "tree" || params.nav === "city") state.navigationSurface = params.nav;
     if (params.city !== undefined && (params.city === "" || cityDirByPath[params.city])) {
       state.cityPath = params.city;
-      synchronizeGraphWithCityPath(params.city);
+      if (state.mode !== "global") synchronizeGraphWithCityPath(params.city);
     }
     var graphId = params.graph || params.sel;
     if (graphId) {
-      if (params.type === "object" && objectById[graphId]) {
+      if (params.type === "file" && treeByPath[graphId]) {
+        state.graphSelection = graphId;
+        state.graphSelectionType = "file";
+      } else if (params.type === "object" && objectById[graphId]) {
         state.graphSelection = graphId;
         state.graphSelectionType = "object";
         if (!params.detail) state.detailSelection = { type: "object", id: graphId };
@@ -207,15 +221,15 @@
     if (params.source && nodeById[params.source] && !state.disabled[params.source]) {
       state.detailSelection = { type: "function", id: params.source };
     }
-    if (params.focus && nodeById[params.focus]) state.focus = params.focus;
     if (params.traceStart && activeTraceFunction(params.traceStart)) {
       state.traceStart = params.traceStart;
-      if (params.scope === undefined) {
+      if (params.scope === undefined && state.mode !== "global") {
         state.scope = moduleOf(params.traceStart);
         expandTo(state.scope);
       }
     }
     if (params.traceEnd && activeTraceFunction(params.traceEnd)) state.traceEnd = params.traceEnd;
+    if (state.mode === "global") state.scope = tree.path;
     if (!params.mode && objectDominated(treeByPath[state.scope] || tree)) state.mode = "objects";
     state.objectFocus = null;
   }
@@ -235,9 +249,11 @@
 
   function baseGraph() {
     var graph;
-    if (state.focus) graph = focusGraph(state.focus);
+    if (state.mode === "global") {
+      return state.globalView === "pipelines" ? globalPipelineGraph() : globalFunctionGraph();
+    }
     var node = treeByPath[state.scope] || tree;
-    if (!graph && state.mode === "objects" && scopeObjects(node).length) graph = objectGraph(node);
+    if (!graph && state.mode === "objects" && node.type === "module" && scopeObjects(node).length) graph = objectGraph(node);
     if (!graph && node.type === "module") graph = moduleGraph(node);
     if (!graph) graph = packageGraph(node);
     return graph;
@@ -266,20 +282,195 @@
       if (state.disabled[e.source] || state.disabled[e.target]) return;
       var gs = groupOf(e.source), gt = groupOf(e.target);
       if (!gs || !gt || gs === gt) return;
-      var rec = agg[gs + ">" + gt] = agg[gs + ">" + gt] || { weight: 0, src: {}, tgt: {} };
+      var edgeKey = e.source + ">" + e.target;
+      var pathIndex = callPathIndexByEdge[edgeKey];
+      var pathId = callPathIdByEdge[edgeKey];
+      var key = gs + ">" + gt + "|" + pathId;
+      var rec = agg[key] = agg[key] || {
+        source: gs,
+        target: gt,
+        pathIndex: pathIndex,
+        pathId: pathId,
+        weight: 0,
+        src: {},
+        tgt: {},
+      };
       rec.weight += 1;
       rec.src[e.source] = (rec.src[e.source] || 0) + 1;
       rec.tgt[e.target] = (rec.tgt[e.target] || 0) + 1;
     });
     var edges = Object.keys(agg).map(function (k) {
-      var p = k.split(">");
       var rec = agg[k];
       return {
-        source: p[0], target: p[1], weight: rec.weight, mutual: !!agg[p[1] + ">" + p[0]],
+        source: rec.source,
+        target: rec.target,
+        pathIndex: rec.pathIndex,
+        pathId: rec.pathId,
+        weight: rec.weight,
         srcCounts: rec.src, tgtCounts: rec.tgt,
       };
     });
     return { items: items, edges: edges, kind: "group" };
+  }
+
+  function globalFunctionGraph() {
+    var functionIdsByModule = {};
+    model.nodes.forEach(function (node) {
+      if (state.disabled[node.id]) return;
+      (functionIdsByModule[node.module] = functionIdsByModule[node.module] || {})[node.id] = true;
+    });
+    var crossFileEdges = model.edges.filter(function (edgeInfo) {
+      if (state.disabled[edgeInfo.source] || state.disabled[edgeInfo.target]) return false;
+      var source = nodeById[edgeInfo.source], target = nodeById[edgeInfo.target];
+      return source && target && source.module !== target.module;
+    });
+    var modulePaths = Object.keys(functionIdsByModule).sort();
+    var items = modulePaths.map(function (modulePath) {
+      return globalFileItem(modulePath, Object.keys(functionIdsByModule[modulePath]));
+    });
+    var edges = crossFileEdges.map(function (edgeInfo) {
+      var source = nodeById[edgeInfo.source], target = nodeById[edgeInfo.target];
+      return {
+        source: source.module,
+        target: target.module,
+        sourceFunction: source.id,
+        targetFunction: target.id,
+        pathIndex: callPathIndexByEdge[source.id + ">" + target.id],
+        pathId: callPathIdByEdge[source.id + ">" + target.id],
+        weight: 1,
+      };
+    }).sort(function (left, right) {
+      return left.source.localeCompare(right.source) ||
+        left.target.localeCompare(right.target) ||
+        left.sourceFunction.localeCompare(right.sourceFunction) ||
+        left.targetFunction.localeCompare(right.targetFunction);
+    });
+    return { items: items, edges: edges, kind: "global" };
+  }
+
+  function globalPipelineGraph() {
+    var activeIds = model.nodes.filter(function (node) {
+      return !state.disabled[node.id];
+    }).map(function (node) { return node.id; });
+    var active = setOf(activeIds);
+    var families = pipelineFamilies(active);
+    var claimed = {};
+    families.forEach(function (family) {
+      family.itemIds.forEach(function (id) { claimed[id] = family.id; });
+    });
+    var items = activeIds.map(function (id) {
+      var item = fnItem(id);
+      if (item.node.kind === "method") item.label = id.slice(item.node.module.length + 1);
+      item.objectId = claimed[id] || null;
+      return item;
+    });
+    var edges = model.edges.filter(function (edgeInfo) {
+      return !state.disabled[edgeInfo.source] && !state.disabled[edgeInfo.target];
+    }).map(function (edgeInfo) {
+      var key = edgeInfo.source + ">" + edgeInfo.target;
+      return {
+        source: edgeInfo.source,
+        target: edgeInfo.target,
+        pathIndex: callPathIndexByEdge[key],
+        pathId: callPathIdByEdge[key],
+        weight: 1,
+      };
+    }).sort(compareRouteEdges);
+    return {
+      items: items,
+      edges: edges,
+      groups: families,
+      freeItemIds: activeIds.filter(function (id) { return !claimed[id]; }),
+      kind: "pipeline-overview",
+    };
+  }
+
+  function pipelineFamilies(active) {
+    var activeOutgoing = {};
+    Object.keys(active).forEach(function (id) { activeOutgoing[id] = []; });
+    model.edges.forEach(function (edgeInfo) {
+      if (!active[edgeInfo.source] || !active[edgeInfo.target]) return;
+      activeOutgoing[edgeInfo.source].push(edgeInfo.target);
+    });
+    Object.keys(activeOutgoing).forEach(function (id) { activeOutgoing[id].sort(); });
+
+    function reachableFrom(rootId) {
+      var reached = {}, queue = [rootId];
+      reached[rootId] = true;
+      for (var index = 0; index < queue.length; index += 1) {
+        (activeOutgoing[queue[index]] || []).forEach(function (target) {
+          if (reached[target]) return;
+          reached[target] = true;
+          queue.push(target);
+        });
+      }
+      return Object.keys(reached).sort();
+    }
+
+    var records = (architecture.pipelines || []).map(function (pipeline, index) {
+      return {
+        index: index,
+        id: pipeline.id,
+        title: pipeline.title,
+        root: pipeline.root,
+        functionIds: active[pipeline.root] ? reachableFrom(pipeline.root) : [],
+      };
+    }).filter(function (pipeline) { return pipeline.functionIds.length; });
+    var parent = {};
+    records.forEach(function (pipeline) { parent[pipeline.index] = pipeline.index; });
+    function find(index) {
+      while (parent[index] !== index) {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+      }
+      return index;
+    }
+    function unite(left, right) {
+      var leftRoot = find(left), rightRoot = find(right);
+      if (leftRoot === rightRoot) return;
+      if (leftRoot < rightRoot) parent[rightRoot] = leftRoot;
+      else parent[leftRoot] = rightRoot;
+    }
+    var ownerByFunction = {};
+    records.forEach(function (pipeline) {
+      pipeline.functionIds.forEach(function (id) {
+        if (ownerByFunction[id] !== undefined) unite(pipeline.index, ownerByFunction[id]);
+        else ownerByFunction[id] = pipeline.index;
+      });
+    });
+    var grouped = {};
+    records.forEach(function (pipeline) {
+      var root = find(pipeline.index);
+      (grouped[root] = grouped[root] || []).push(pipeline);
+    });
+    return Object.keys(grouped).map(Number).sort(function (left, right) {
+      return left - right;
+    }).map(function (root, familyIndex) {
+      var pipelines = grouped[root].slice().sort(function (left, right) {
+        return left.index - right.index;
+      });
+      var itemSet = {}, roots = [];
+      pipelines.forEach(function (pipeline) {
+        pipeline.functionIds.forEach(function (id) { itemSet[id] = true; });
+        if (active[pipeline.root] && roots.indexOf(pipeline.root) < 0) roots.push(pipeline.root);
+      });
+      roots.sort();
+      var label = pipelines[0].title;
+      if (roots.length > 1) {
+        var additionalRoots = roots.length - 1;
+        label += " + " + additionalRoots + (additionalRoots === 1 ? " entry root" : " entry roots");
+      }
+      return {
+        id: "pipeline-family-" + familyIndex,
+        label: label,
+        itemIds: Object.keys(itemSet).sort(),
+        anchorId: roots[0] || Object.keys(itemSet).sort()[0],
+        rootIds: roots,
+        pipelineCount: pipelines.length,
+      };
+    }).sort(function (left, right) {
+      return right.itemIds.length - left.itemIds.length || left.label.localeCompare(right.label);
+    });
   }
 
   function moduleGraph(node) {
@@ -287,8 +478,17 @@
     var ids = setOf(activeIds);
     var items = activeIds.map(fnItem);
     var edges = model.edges.filter(function (e) { return ids[e.source] && ids[e.target]; })
-      .map(function (e) { return { source: e.source, target: e.target, weight: 1 }; });
-    return { items: items, edges: edges, kind: "function", clones: cloneEdges(activeIds) };
+      .map(function (e) {
+        var key = e.source + ">" + e.target;
+        return {
+          source: e.source,
+          target: e.target,
+          pathIndex: callPathIndexByEdge[key],
+          pathId: callPathIdByEdge[key],
+          weight: 1,
+        };
+      });
+    return { items: items, edges: edges, kind: "function" };
   }
 
   function objectGraph(node) {
@@ -320,24 +520,20 @@
     var edges = model.edges.filter(function (edgeInfo) {
       return active[edgeInfo.source] && active[edgeInfo.target];
     }).map(function (edgeInfo) {
-      return { source: edgeInfo.source, target: edgeInfo.target, weight: 1 };
+      return {
+        source: edgeInfo.source,
+        target: edgeInfo.target,
+        pathIndex: callPathIndexByEdge[edgeInfo.source + ">" + edgeInfo.target],
+        pathId: callPathIdByEdge[edgeInfo.source + ">" + edgeInfo.target],
+        weight: 1,
+      };
     }).sort(compareEdges);
-    var stateLinks = [];
-    groups.forEach(function (methodGroup) {
-      var groupIds = setOf(methodGroup.itemIds);
-      var callEdges = edges.filter(function (edgeInfo) {
-        return groupIds[edgeInfo.source] && groupIds[edgeInfo.target];
-      });
-      stateLinks = stateLinks.concat(stateLinksForObject(methodGroup.object, methodGroup.itemIds, callEdges));
-    });
     return {
       items: items,
       edges: edges,
-      stateLinks: stateLinks,
       groups: groups,
       freeItemIds: activeIds.filter(function (id) { return !claimed[id]; }),
       kind: "object-overview",
-      clones: cloneEdges(activeIds),
     };
   }
 
@@ -387,7 +583,13 @@
     var callEdges = model.edges.filter(function (edgeInfo) {
       return present[edgeInfo.source] && present[edgeInfo.target];
     }).map(function (edgeInfo) {
-      return { source: edgeInfo.source, target: edgeInfo.target, weight: 1 };
+      return {
+        source: edgeInfo.source,
+        target: edgeInfo.target,
+        pathIndex: callPathIndexByEdge[edgeInfo.source + ">" + edgeInfo.target],
+        pathId: callPathIdByEdge[edgeInfo.source + ">" + edgeInfo.target],
+        weight: 1,
+      };
     }).sort(compareEdges);
     var initializationIds = constructorId && present[constructorId]
       ? reachableMethodIds(constructorId, callEdges)
@@ -406,7 +608,6 @@
         anchorId: null,
       },
     ];
-    var stateLinks = stateLinksForObject(object, methodIds, callEdges);
     var items = methodIds.map(function (id) {
       var item = fnItem(id);
       item.isConstructor = id === constructorId;
@@ -415,7 +616,6 @@
     return {
       items: items,
       edges: callEdges,
-      stateLinks: stateLinks,
       groups: groups,
       kind: "object-method",
       object: object,
@@ -457,43 +657,68 @@
     return reached;
   }
 
-  function stateLinksForObject(object, methodIds, callEdges) {
-    var constructor = object.constructor || { method_id: null, assigned_fields: [] };
-    if (!constructor.method_id || !constructor.assigned_fields.length) return [];
-    var initialized = setOf(constructor.assigned_fields);
-    var directCalls = {};
-    callEdges.forEach(function (edgeInfo) { directCalls[edgeInfo.source + ">" + edgeInfo.target] = true; });
-    return (object.field_access || []).filter(function (access) {
-      return access.method_id !== constructor.method_id && methodIds.indexOf(access.method_id) >= 0;
-    }).map(function (access) {
-      var fields = access.reads.concat(access.writes).filter(function (field) { return initialized[field]; });
-      return {
-        source: constructor.method_id,
-        target: access.method_id,
-        fields: fields.filter(function (field, index) { return fields.indexOf(field) === index; }).sort(),
-      };
-    }).filter(function (link) {
-      // A direct call already explains the relationship; keep the optional
-      // state links sparse enough to remain readable.
-      return link.fields.length && !directCalls[link.source + ">" + link.target];
-    }).sort(compareEdges);
-  }
-
   function compareEdges(left, right) {
-    return left.source.localeCompare(right.source) || left.target.localeCompare(right.target);
+    return left.source.localeCompare(right.source) ||
+      left.target.localeCompare(right.target) ||
+      (left.pathIndex || 0) - (right.pathIndex || 0) ||
+      (left.pathId === undefined ? -1 : left.pathId) - (right.pathId === undefined ? -1 : right.pathId) ||
+      String(left.sourceFunction || "").localeCompare(String(right.sourceFunction || "")) ||
+      String(left.targetFunction || "").localeCompare(String(right.targetFunction || ""));
   }
 
-  function focusGraph(id) {
-    if (state.disabled[id]) return moduleGraph(treeByPath[moduleOf(id)] || tree);
-    var set = {};
-    set[id] = true;
-    (outAdj[id] || []).forEach(function (t) { if (!state.disabled[t]) set[t] = true; });
-    (inAdj[id] || []).forEach(function (s) { if (!state.disabled[s]) set[s] = true; });
-    var ids = Object.keys(set);
-    var items = ids.map(fnItem);
-    var edges = model.edges.filter(function (e) { return set[e.source] && set[e.target]; })
-      .map(function (e) { return { source: e.source, target: e.target, weight: 1 }; });
-    return { items: items, edges: edges, kind: "function", center: id, clones: cloneEdges(ids) };
+  function compareRouteEdges(left, right) {
+    return (left.pathIndex === undefined ? 0 : left.pathIndex) -
+      (right.pathIndex === undefined ? 0 : right.pathIndex) ||
+      (left.pathId === undefined ? -1 : left.pathId) -
+      (right.pathId === undefined ? -1 : right.pathId) ||
+      compareEdges(left, right);
+  }
+
+  // Each path is one maximal, non-branching chain of resolved calls. Branches
+  // start new paths; pure cycles are assigned deterministically. The first five
+  // tab10 colours repeat, while path identity remains unique for routing.
+  function buildCallPaths(edges) {
+    var orderedEdges = edges.slice().sort(compareEdges);
+    var incoming = {}, outgoing = {};
+    orderedEdges.forEach(function (edgeInfo) {
+      (incoming[edgeInfo.target] = incoming[edgeInfo.target] || []).push(edgeInfo);
+      (outgoing[edgeInfo.source] = outgoing[edgeInfo.source] || []).push(edgeInfo);
+    });
+    Object.keys(incoming).forEach(function (id) { incoming[id].sort(compareEdges); });
+    Object.keys(outgoing).forEach(function (id) { outgoing[id].sort(compareEdges); });
+
+    var assigned = {}, paths = [];
+    function edgeKey(edgeInfo) { return edgeInfo.source + ">" + edgeInfo.target; }
+    function collectPath(firstEdge) {
+      var path = [];
+      var edgeInfo = firstEdge;
+      while (edgeInfo && !assigned[edgeKey(edgeInfo)]) {
+        var key = edgeKey(edgeInfo);
+        assigned[key] = true;
+        path.push(key);
+        var target = edgeInfo.target;
+        edgeInfo = (incoming[target] || []).length === 1 && (outgoing[target] || []).length === 1
+          ? outgoing[target][0]
+          : null;
+      }
+      if (path.length) paths.push(path);
+    }
+
+    orderedEdges.forEach(function (edgeInfo) {
+      var source = edgeInfo.source;
+      if ((incoming[source] || []).length !== 1 || (outgoing[source] || []).length !== 1) collectPath(edgeInfo);
+    });
+    orderedEdges.forEach(function (edgeInfo) { collectPath(edgeInfo); });
+    paths.sort(function (left, right) { return left[0].localeCompare(right[0]); });
+
+    var colorByEdge = {}, idByEdge = {};
+    paths.forEach(function (path, index) {
+      path.forEach(function (key) {
+        colorByEdge[key] = index % 5;
+        idByEdge[key] = index;
+      });
+    });
+    return { colorByEdge: colorByEdge, idByEdge: idByEdge, count: paths.length };
   }
 
   function traceGraph(startId, endId) {
@@ -504,12 +729,8 @@
   // graph intact preserves unrelated and orphaned functions while the static
   // route remains unmistakable.
   function applyTrace(graph, startId, endId) {
-    if (graph.kind !== "function" && graph.kind !== "object-overview") {
-      var moduleNode = treeByPath[moduleOf(startId)] || tree;
-      graph = state.mode === "objects" && scopeObjects(moduleNode).length
-        ? objectGraph(moduleNode)
-        : moduleGraph(moduleNode);
-    }
+    if (graph.kind === "global") return applyGlobalTrace(graph, startId, endId);
+    if (graph.kind !== "function" && graph.kind !== "object-overview" && graph.kind !== "pipeline-overview") return graph;
     var route = endId
       ? core.shortestDirectedPath(model.edges, startId, endId, state.disabled)
       : null;
@@ -519,38 +740,6 @@
         .concat((inAdj[startId] || []).filter(activeTraceFunction))
         .concat((outAdj[startId] || []).filter(activeTraceFunction));
     tracedIds = tracedIds.filter(function (id, index) { return tracedIds.indexOf(id) === index; });
-
-    var present = {};
-    graph.items.forEach(function (item) { present[item.id] = true; });
-    tracedIds.forEach(function (id) {
-      if (present[id] || !activeTraceFunction(id)) return;
-      var item = fnItem(id);
-      graph.items.push(item);
-      present[id] = true;
-      if (graph.kind !== "object-overview") return;
-      var objectId = methodObjectById[id];
-      var object = objectId && objectById[objectId];
-      if (!object) {
-        graph.freeItemIds.push(id);
-        return;
-      }
-      var methodGroup = graph.groups.filter(function (candidate) { return candidate.id === objectId; })[0];
-      if (!methodGroup) {
-        methodGroup = {
-          id: objectId,
-          object: object,
-          label: object.module.split(".").slice(-1)[0] + "." + object.name,
-          itemIds: [],
-          anchorId: null,
-          traceContext: true,
-        };
-        graph.groups.push(methodGroup);
-      }
-      methodGroup.itemIds.push(id);
-      item.objectId = objectId;
-      item.isConstructor = !!object.constructor && object.constructor.method_id === id;
-      if (item.isConstructor) methodGroup.anchorId = id;
-    });
 
     var traceEdges = {};
     if (route) {
@@ -562,20 +751,11 @@
       (outAdj[startId] || []).forEach(function (target) { traceEdges[startId + ">" + target] = true; });
     }
 
-    var edgeByKey = {};
     graph.edges = graph.edges.map(function (edgeInfo) {
       var copy = Object.assign({}, edgeInfo);
       var key = copy.source + ">" + copy.target;
       copy.inTrace = !!traceEdges[key];
-      edgeByKey[key] = copy;
       return copy;
-    });
-    model.edges.forEach(function (edgeInfo) {
-      var key = edgeInfo.source + ">" + edgeInfo.target;
-      if (!traceEdges[key] || edgeByKey[key] || !present[edgeInfo.source] || !present[edgeInfo.target]) return;
-      var copy = { source: edgeInfo.source, target: edgeInfo.target, weight: 1, inTrace: true };
-      graph.edges.push(copy);
-      edgeByKey[key] = copy;
     });
 
     graph.items.forEach(function (item) {
@@ -593,23 +773,45 @@
     return graph;
   }
 
-  function activeTraceFunction(id) {
-    return !!nodeById[id] && !state.disabled[id];
+  function applyGlobalTrace(graph, startId, endId) {
+    var route = endId
+      ? core.shortestDirectedPath(model.edges, startId, endId, state.disabled)
+      : null;
+    var tracedIds = endId
+      ? route || [startId, endId]
+      : [startId]
+        .concat((inAdj[startId] || []).filter(activeTraceFunction))
+        .concat((outAdj[startId] || []).filter(activeTraceFunction));
+    tracedIds = tracedIds.filter(function (id, index) { return tracedIds.indexOf(id) === index; });
+    var traced = setOf(tracedIds);
+    var traceEdges = {};
+    if (route) {
+      for (var index = 0; index < route.length - 1; index += 1) {
+        traceEdges[route[index] + ">" + route[index + 1]] = true;
+      }
+    } else if (!endId) {
+      (inAdj[startId] || []).forEach(function (source) { traceEdges[source + ">" + startId] = true; });
+      (outAdj[startId] || []).forEach(function (target) { traceEdges[startId + ">" + target] = true; });
+    }
+    graph.edges = graph.edges.map(function (edgeInfo) {
+      var copy = Object.assign({}, edgeInfo);
+      copy.inTrace = !!traceEdges[copy.sourceFunction + ">" + copy.targetFunction];
+      return copy;
+    });
+    graph.items.forEach(function (item) {
+      item.card.traceFunctionIds = traced;
+      item.traceFile = item.card.rows.some(function (row) { return traced[row.id]; });
+    });
+    graph.traceActive = true;
+    graph.traceStart = startId;
+    graph.traceEnd = endId;
+    graph.route = route;
+    graph.noRoute = !!endId && !route;
+    return graph;
   }
 
-  function cloneEdges(ids) {
-    var present = setOf(ids);
-    var seen = {}, links = [];
-    ids.forEach(function (id) {
-      (clonePartner[id] || []).forEach(function (other) {
-        if (!present[other]) return;
-        var key = [id, other].sort().join(">");
-        if (seen[key]) return;
-        seen[key] = true;
-        links.push({ source: id, target: other });
-      });
-    });
-    return links;
+  function activeTraceFunction(id) {
+    return !!nodeById[id] && !state.disabled[id];
   }
 
   function groupItem(child) {
@@ -626,6 +828,16 @@
     var it = { id: child.path, kind: "file", node: child, label: child.name };
     it.card = fileCardLayout(child);
     return it;
+  }
+
+  function globalFileItem(modulePath, functionIds) {
+    var moduleNode = treeByPath[modulePath];
+    var item = { id: modulePath, kind: "file", node: moduleNode, label: moduleNode.name };
+    item.card = globalFileCardLayout(moduleNode, functionIds);
+    item.isExample = !!exampleModules[modulePath];
+    item.isOrchestrator = !!orchestratorModules[modulePath];
+    item.importedFunctionCount = orchestratorModules[modulePath] || 0;
+    return item;
   }
 
   // Measured card for a module: public top-level functions as rows, so edges
@@ -651,24 +863,51 @@
     var longest = child.name.length + 1;
     rows.forEach(function (row) { longest = Math.max(longest, (row.name || row.more || "").length); });
     var width = Math.min(300, Math.max(190, 40 + longest * 6.3));
-    return { rows: rows, rowY: rowY, width: width, height: y + 6, chars: Math.floor((width - 30) / 6.3), hue: hueIndex(child.path) };
+    return { rows: rows, rowY: rowY, width: width, height: y + 6, chars: Math.floor((width - 30) / 6.3) };
   }
 
-  function hueIndex(path) {
-    var h = 0;
-    for (var i = 0; i < path.length; i += 1) h = (h * 31 + path.charCodeAt(i)) % 8;
-    return h;
+  function globalFileCardLayout(moduleNode, functionIds) {
+    var rows = functionIds.map(function (id) { return nodeById[id]; }).sort(function (left, right) {
+      return left.line_start - right.line_start || left.name.localeCompare(right.name);
+    }).map(function (node, index) {
+      var name = node.kind === "method" ? node.id.slice(node.module.length + 1) : node.name;
+      return { id: node.id, name: name, y: 58 + index * 18 };
+    });
+    var rowY = {};
+    rows.forEach(function (row) { rowY[row.id] = row.y - 4; });
+    var longest = moduleNode.name.length + 10;
+    rows.forEach(function (row) { longest = Math.max(longest, row.name.length); });
+    var width = Math.min(310, Math.max(200, 42 + longest * 6.3));
+    return {
+      rows: rows,
+      rowY: rowY,
+      width: width,
+      height: 58 + rows.length * 18 + 10,
+      chars: Math.floor((width - 32) / 6.3),
+      global: true,
+    };
   }
 
   // --- layered layout (presentation only) ---------------------------------
 
   function layout(graph) {
+    if (graph.kind === "global") {
+      layoutGlobalGraph(graph);
+      return;
+    }
+    if (graph.kind === "pipeline-overview") {
+      layoutObjectOverviewGraph(graph);
+      assignEdgeRoutes(graph);
+      return;
+    }
     if (graph.kind === "object-overview") {
       layoutObjectOverviewGraph(graph);
+      assignEdgeRoutes(graph);
       return;
     }
     if (graph.kind === "object-method") {
       layoutObjectMethodGraph(graph);
+      assignEdgeRoutes(graph);
       return;
     }
     if (graph.kind === "trace") {
@@ -677,19 +916,12 @@
     }
     var items = graph.items;
     if (!items.length) return;
-    var rect = canvas.getBoundingClientRect();
-    var available = Math.max(420, (rect.width || 900) - 2 * MARGIN);
-    var maxColumns = graph.kind === "group" ? 4 : 4;
     var byId = {};
-    var totalW = 0;
     items.forEach(function (it) {
       it.w = nodeWidth(it);
       it.h = nodeHeight(it);
-      totalW += it.w;
       byId[it.id] = it;
     });
-    var slotW = Math.max(COL, totalW / items.length + 28);
-    var columns = Math.max(1, Math.min(maxColumns, Math.floor(available / slotW)));
     var out = {}, inc = {}, indeg = {};
     items.forEach(function (it) { indeg[it.id] = 0; });
     graph.edges.forEach(function (e) {
@@ -747,19 +979,361 @@
     var y = 0;
     layers.forEach(function (layer) {
       var row = byLayer[layer];
-      for (var start = 0; start < row.length; start += columns) {
-        var chunk = row.slice(start, start + columns);
-        var total = chunk.reduce(function (sum, it) { return sum + it.w; }, 0) + (chunk.length - 1) * 34;
-        var rowHeight = chunk.reduce(function (max, it) { return Math.max(max, it.h || NODE_H); }, NODE_H);
-        var x = -total / 2;
-        chunk.forEach(function (it) {
-          it.cx = x + it.w / 2;
-          it.cy = y + (it.h || NODE_H) / 2;
-          x += it.w + 34;
-        });
-        y += rowHeight + (ROW - NODE_H);
+      var total = row.reduce(function (sum, it) { return sum + it.w; }, 0) + (row.length - 1) * 58;
+      var rowHeight = row.reduce(function (max, it) { return Math.max(max, it.h || NODE_H); }, NODE_H);
+      var x = -total / 2;
+      row.forEach(function (it) {
+        it.cx = x + it.w / 2;
+        it.cy = y + (it.h || NODE_H) / 2;
+        x += it.w + 58;
+      });
+      y += rowHeight + 92;
+    });
+    assignEdgeRoutes(graph);
+  }
+
+  function assignEdgeRoutes(graph) {
+    if (!graph.items.length) return;
+    var byId = {};
+    graph.items.forEach(function (item) { byId[item.id] = item; });
+    var minX = Math.min.apply(null, graph.items.map(function (item) { return item.cx - item.w / 2; }));
+    var maxX = Math.max.apply(null, graph.items.map(function (item) { return item.cx + item.w / 2; }));
+    (graph.groups || []).forEach(function (groupInfo) {
+      if (groupInfo.left === undefined || groupInfo.width === undefined) return;
+      minX = Math.min(minX, groupInfo.left);
+      maxX = Math.max(maxX, groupInfo.left + groupInfo.width);
+    });
+    var corridors = {}, outer = [];
+    graph.edges.forEach(function (edgeInfo) {
+      var source = byId[edgeInfo.source], target = byId[edgeInfo.target];
+      if (!source || !target) return;
+      if (graph.kind === "pipeline-overview") {
+        outer.push(edgeInfo);
+        return;
       }
-      y += 18;
+      var sameZone = (source.objectId || "outside") === (target.objectId || "outside");
+      if (sameZone && target.layer === source.layer + 1) {
+        var key = (source.objectId || "outside") + ":" + source.layer + ">" + target.layer;
+        (corridors[key] = corridors[key] || []).push(edgeInfo);
+      } else {
+        outer.push(edgeInfo);
+      }
+    });
+    Object.keys(corridors).forEach(function (key) {
+      var edges = corridors[key].sort(compareRouteEdges);
+      var routedEdges = edges.slice(0, 12);
+      var offsets = coloredLaneOffsets(routedEdges, 5, 5);
+      edges.forEach(function (edgeInfo, index) {
+        if (index >= 12) {
+          outer.push(edgeInfo);
+          return;
+        }
+        var source = byId[edgeInfo.source], target = byId[edgeInfo.target];
+        var sourceBottom = source.cy + source.h / 2;
+        var targetTop = target.cy - target.h / 2;
+        edgeInfo.route = "corridor";
+        edgeInfo.routeY = (sourceBottom + targetTop) / 2 + offsets[index];
+      });
+    });
+    var outerLaneState = {
+      "-1": { distance: 0, color: null, count: 0 },
+      "1": { distance: 0, color: null, count: 0 },
+    };
+    outer.sort(compareRouteEdges).forEach(function (edgeInfo) {
+      edgeInfo.route = "outer";
+      edgeInfo.routeSide = (edgeInfo.pathIndex || 0) % 2 ? -1 : 1;
+      var laneState = outerLaneState[String(edgeInfo.routeSide)];
+      if (laneState.count && laneState.color !== edgeInfo.pathIndex) laneState.distance += 8;
+      var distance = laneState.distance;
+      laneState.distance += 13;
+      laneState.color = edgeInfo.pathIndex;
+      laneState.count += 1;
+      edgeInfo.routeX = edgeInfo.routeSide > 0
+        ? maxX + 54 + distance
+        : minX - 54 - distance;
+    });
+    graph.routeLeft = outer.reduce(function (left, edgeInfo) { return Math.min(left, edgeInfo.routeX); }, minX);
+    graph.routeRight = outer.reduce(function (right, edgeInfo) { return Math.max(right, edgeInfo.routeX); }, maxX);
+    assignFunctionEdgePorts(graph.edges);
+  }
+
+  function layoutGlobalGraph(graph) {
+    var byId = {};
+    graph.items.forEach(function (item) {
+      item.w = nodeWidth(item);
+      item.h = nodeHeight(item);
+      byId[item.id] = item;
+    });
+    if (!graph.items.length) return;
+
+    var outgoing = {}, incoming = {};
+    graph.items.forEach(function (item) {
+      outgoing[item.id] = {};
+      incoming[item.id] = {};
+    });
+    graph.edges.forEach(function (edgeInfo) {
+      if (!byId[edgeInfo.source] || !byId[edgeInfo.target] || edgeInfo.source === edgeInfo.target) return;
+      if (outgoing[edgeInfo.source][edgeInfo.target]) return;
+      outgoing[edgeInfo.source][edgeInfo.target] = true;
+      incoming[edgeInfo.target][edgeInfo.source] = true;
+    });
+    var connectedIds = Object.keys(byId).filter(function (id) {
+      return Object.keys(outgoing[id]).length || Object.keys(incoming[id]).length;
+    }).sort();
+    var disconnectedIds = Object.keys(byId).filter(function (id) {
+      return !Object.keys(outgoing[id]).length && !Object.keys(incoming[id]).length;
+    }).sort();
+
+    var visited = {}, finishOrder = [];
+    function visitForward(id) {
+      if (visited[id]) return;
+      visited[id] = true;
+      Object.keys(outgoing[id]).sort().forEach(visitForward);
+      finishOrder.push(id);
+    }
+    connectedIds.forEach(visitForward);
+
+    var componentById = {}, components = [];
+    function visitReverse(id, component) {
+      if (componentById[id] !== undefined) return;
+      componentById[id] = components.length;
+      component.push(id);
+      Object.keys(incoming[id]).sort().forEach(function (source) { visitReverse(source, component); });
+    }
+    finishOrder.reverse().forEach(function (id) {
+      if (componentById[id] !== undefined) return;
+      var component = [];
+      visitReverse(id, component);
+      component.sort();
+      components.push(component);
+    });
+
+    var componentOutgoing = {}, componentIncoming = {}, remainingComponents = {};
+    components.forEach(function (_, index) {
+      componentOutgoing[index] = {};
+      componentIncoming[index] = 0;
+      remainingComponents[index] = true;
+    });
+    graph.edges.forEach(function (edgeInfo) {
+      var sourceComponent = componentById[edgeInfo.source];
+      var targetComponent = componentById[edgeInfo.target];
+      if (sourceComponent === targetComponent || componentOutgoing[sourceComponent][targetComponent]) return;
+      componentOutgoing[sourceComponent][targetComponent] = true;
+      componentIncoming[targetComponent] += 1;
+    });
+
+    var layers = [];
+    while (Object.keys(remainingComponents).length) {
+      var readyComponents = Object.keys(remainingComponents).map(Number).filter(function (index) {
+        return componentIncoming[index] === 0;
+      }).sort(function (left, right) {
+        return components[left][0].localeCompare(components[right][0]);
+      });
+      var layerIds = [];
+      readyComponents.forEach(function (componentIndex) {
+        layerIds = layerIds.concat(components[componentIndex]);
+        delete remainingComponents[componentIndex];
+        Object.keys(componentOutgoing[componentIndex]).forEach(function (target) {
+          if (remainingComponents[target]) componentIncoming[target] -= 1;
+        });
+      });
+      layers.push(layerIds);
+    }
+    if (disconnectedIds.length) layers.push(disconnectedIds);
+
+    var layerById = {}, order = {};
+    layers.forEach(function (ids, layerIndex) {
+      ids.forEach(function (id, index) {
+        layerById[id] = layerIndex;
+        order[id] = index;
+      });
+    });
+    function reorderLayer(layerIndex, neighborMap) {
+      layers[layerIndex] = layers[layerIndex].map(function (id, index) {
+        var neighbors = Object.keys(neighborMap[id] || {}).filter(function (neighbor) {
+          return order[neighbor] !== undefined;
+        });
+        var average = neighbors.length
+          ? neighbors.reduce(function (sum, neighbor) { return sum + order[neighbor]; }, 0) / neighbors.length
+          : index;
+        return { id: id, average: average, index: index };
+      }).sort(function (left, right) {
+        return left.average - right.average || left.index - right.index || left.id.localeCompare(right.id);
+      }).map(function (entry) { return entry.id; });
+      layers[layerIndex].forEach(function (id, index) { order[id] = index; });
+    }
+    for (var pass = 0; pass < 4; pass += 1) {
+      for (var forward = 1; forward < layers.length; forward += 1) reorderLayer(forward, incoming);
+      for (var backward = layers.length - 2; backward >= 0; backward -= 1) reorderLayer(backward, outgoing);
+    }
+
+    var corridorLaneKeys = {};
+    graph.edges.forEach(function (edgeInfo) {
+      var sourceLayer = layerById[edgeInfo.source], targetLayer = layerById[edgeInfo.target];
+      if (targetLayer !== sourceLayer + 1) return;
+      var boundary = sourceLayer + ">" + targetLayer;
+      var laneKey = edgeInfo.pathId + "|" + edgeInfo.sourceFunction + ">" + edgeInfo.targetFunction;
+      (corridorLaneKeys[boundary] = corridorLaneKeys[boundary] || {})[laneKey] = edgeInfo;
+    });
+    var x = 0;
+    graph.layerBounds = [];
+    layers.forEach(function (ids, layerIndex) {
+      var items = ids.map(function (id) { return byId[id]; });
+      var layerWidth = items.reduce(function (width, item) { return Math.max(width, item.w); }, 200);
+      var totalHeight = items.reduce(function (height, item) { return height + item.h; }, 0) + (items.length - 1) * 54;
+      var y = -totalHeight / 2;
+      items.forEach(function (item) {
+        item.layer = layerIndex;
+        item.cx = x + layerWidth / 2;
+        item.cy = y + item.h / 2;
+        y += item.h + 54;
+      });
+      graph.layerBounds.push({
+        left: x,
+        right: x + layerWidth,
+        top: -totalHeight / 2,
+        bottom: totalHeight / 2,
+      });
+      var boundary = layerIndex + ">" + (layerIndex + 1);
+      var laneEdges = Object.keys(corridorLaneKeys[boundary] || {}).map(function (key) {
+        return corridorLaneKeys[boundary][key];
+      }).sort(compareRouteEdges);
+      var laneOffsets = coloredLaneOffsets(laneEdges, 12, 8);
+      var laneSpan = laneOffsets.length > 1 ? laneOffsets[laneOffsets.length - 1] - laneOffsets[0] : 0;
+      x += layerWidth + Math.max(220, laneSpan + 108);
+    });
+
+    var adjacent = {}, outer = [];
+    graph.edges.forEach(function (edgeInfo) {
+      var sourceLayer = layerById[edgeInfo.source], targetLayer = layerById[edgeInfo.target];
+      if (targetLayer === sourceLayer + 1) {
+        var key = sourceLayer + ">" + targetLayer;
+        var laneKey = edgeInfo.pathId + "|" + edgeInfo.sourceFunction + ">" + edgeInfo.targetFunction;
+        var lanes = adjacent[key] = adjacent[key] || {};
+        (lanes[laneKey] = lanes[laneKey] || []).push(edgeInfo);
+      } else {
+        outer.push(edgeInfo);
+      }
+    });
+    Object.keys(adjacent).forEach(function (key) {
+      var lanes = adjacent[key];
+      var laneKeys = Object.keys(lanes).sort(function (left, right) {
+        return compareRouteEdges(lanes[left][0], lanes[right][0]);
+      });
+      var firstEdge = lanes[laneKeys[0]][0];
+      var sourceLayer = layerById[firstEdge.source];
+      var left = graph.layerBounds[sourceLayer].right;
+      var right = graph.layerBounds[sourceLayer + 1].left;
+      var laneEdges = laneKeys.map(function (laneKey) { return lanes[laneKey][0]; });
+      var laneOffsets = coloredLaneOffsets(laneEdges, 12, 8);
+      laneKeys.forEach(function (laneKey, index) {
+        var routeX = (left + right) / 2 + laneOffsets[index];
+        lanes[laneKey].forEach(function (edgeInfo) {
+          edgeInfo.route = "corridor";
+          edgeInfo.routeX = routeX;
+        });
+      });
+    });
+    var graphTop = Math.min.apply(null, graph.layerBounds.map(function (bounds) { return bounds.top; }));
+    var outerLanes = {};
+    outer.forEach(function (edgeInfo) {
+      var key = edgeInfo.pathId + "|" + edgeInfo.sourceFunction + ">" + edgeInfo.targetFunction;
+      (outerLanes[key] = outerLanes[key] || []).push(edgeInfo);
+    });
+    var outerLaneKeys = Object.keys(outerLanes).sort(function (left, right) {
+      return compareRouteEdges(outerLanes[left][0], outerLanes[right][0]);
+    });
+    var outerLaneEdges = outerLaneKeys.map(function (key) { return outerLanes[key][0]; });
+    var outerLaneOffsets = coloredLaneOffsets(outerLaneEdges, 11, 8);
+    var outerLaneStart = outerLaneOffsets.length ? outerLaneOffsets[0] : 0;
+    outerLaneKeys.forEach(function (key, index) {
+      outerLanes[key].forEach(function (edgeInfo) {
+        edgeInfo.route = "outer";
+        edgeInfo.routeY = graphTop - 48 - (outerLaneOffsets[index] - outerLaneStart);
+      });
+    });
+    graph.routeTop = outerLaneKeys.length
+      ? graphTop - 48 - (outerLaneOffsets[outerLaneOffsets.length - 1] - outerLaneStart)
+      : graphTop;
+    assignGlobalEdgePorts(graph, byId);
+  }
+
+  function assignFunctionEdgePorts(edges) {
+    var sourceGroups = {}, targetGroups = {};
+    edges.forEach(function (edgeInfo) {
+      (sourceGroups[edgeInfo.source] = sourceGroups[edgeInfo.source] || []).push(edgeInfo);
+      (targetGroups[edgeInfo.target] = targetGroups[edgeInfo.target] || []).push(edgeInfo);
+    });
+    assignPortOffsets(sourceGroups, "sourcePortOffset", 22);
+    assignPortOffsets(targetGroups, "targetPortOffset", 22);
+  }
+
+  function assignGlobalEdgePorts(graph, byId) {
+    var sourcePorts = {}, targetPorts = {}, sourceRails = {}, targetRails = {};
+    graph.routeLeft = Infinity;
+    graph.routeRight = -Infinity;
+    graph.edges.forEach(function (edgeInfo) {
+      var source = byId[edgeInfo.source], target = byId[edgeInfo.target];
+      var sourceSide = target.cx >= source.cx ? 1 : -1;
+      var targetSide = -sourceSide;
+      edgeInfo.sourceSide = sourceSide;
+      edgeInfo.targetSide = targetSide;
+      (sourcePorts[edgeInfo.sourceFunction + "|" + sourceSide] =
+        sourcePorts[edgeInfo.sourceFunction + "|" + sourceSide] || []).push(edgeInfo);
+      (targetPorts[edgeInfo.targetFunction + "|" + targetSide] =
+        targetPorts[edgeInfo.targetFunction + "|" + targetSide] || []).push(edgeInfo);
+      if (edgeInfo.route !== "outer") return;
+      (sourceRails[edgeInfo.source + "|" + sourceSide] =
+        sourceRails[edgeInfo.source + "|" + sourceSide] || []).push(edgeInfo);
+      (targetRails[edgeInfo.target + "|" + targetSide] =
+        targetRails[edgeInfo.target + "|" + targetSide] || []).push(edgeInfo);
+    });
+    assignPortOffsets(sourcePorts, "sourcePortOffset", 10);
+    assignPortOffsets(targetPorts, "targetPortOffset", 10);
+    assignRailOffsets(sourceRails, "sourceRailOffset");
+    assignRailOffsets(targetRails, "targetRailOffset");
+    graph.edges.forEach(function (edgeInfo) {
+      if (edgeInfo.route !== "outer") return;
+      var sourceBounds = graph.layerBounds[byId[edgeInfo.source].layer];
+      var targetBounds = graph.layerBounds[byId[edgeInfo.target].layer];
+      var sourceRail = edgeInfo.sourceSide > 0
+        ? sourceBounds.right + 28 + edgeInfo.sourceRailOffset
+        : sourceBounds.left - 28 - edgeInfo.sourceRailOffset;
+      var targetRail = edgeInfo.targetSide > 0
+        ? targetBounds.right + 28 + edgeInfo.targetRailOffset
+        : targetBounds.left - 28 - edgeInfo.targetRailOffset;
+      graph.routeLeft = Math.min(graph.routeLeft, sourceRail, targetRail);
+      graph.routeRight = Math.max(graph.routeRight, sourceRail, targetRail);
+    });
+  }
+
+  function assignPortOffsets(groups, property, span) {
+    Object.keys(groups).forEach(function (key) {
+      var edges = groups[key].sort(compareRouteEdges);
+      var gap = edges.length > 1 ? Math.min(4, span / (edges.length - 1)) : 0;
+      edges.forEach(function (edgeInfo, index) {
+        edgeInfo[property] = (index - (edges.length - 1) / 2) * gap;
+      });
+    });
+  }
+
+  function coloredLaneOffsets(edges, spacing, colorGap) {
+    if (!edges.length) return [];
+    var offsets = [0];
+    for (var index = 1; index < edges.length; index += 1) {
+      var gap = spacing;
+      if (edges[index - 1].pathIndex !== edges[index].pathIndex) gap += colorGap;
+      offsets.push(offsets[index - 1] + gap);
+    }
+    var center = (offsets[0] + offsets[offsets.length - 1]) / 2;
+    return offsets.map(function (offset) { return offset - center; });
+  }
+
+  function assignRailOffsets(groups, property) {
+    Object.keys(groups).forEach(function (key) {
+      groups[key].sort(compareRouteEdges).forEach(function (edgeInfo, index) {
+        edgeInfo[property] = index * 7;
+      });
     });
   }
 
@@ -771,8 +1345,9 @@
       itemsById[item.id] = item;
     });
 
-    var canvasRect = canvas.getBoundingClientRect();
-    var available = Math.max(420, (canvasRect.width || 900) - 2 * MARGIN);
+    var available = graph.kind === "pipeline-overview"
+      ? Math.min(3600, Math.max(1600, Math.ceil(Math.sqrt(graph.items.length)) * 210))
+      : 1200;
     var groupGap = 28;
     graph.groups.forEach(function (methodGroup) {
       var groupItems = methodGroup.itemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
@@ -786,6 +1361,10 @@
       var maxWidth = groupItems.reduce(function (width, item) { return Math.max(width, item.w); }, 164);
       var innerColumns = groupItems.length > 3 && available >= 760 ? 2 : 1;
       var maxGroupWidth = Math.max(280, Math.min(620, available));
+      if (graph.kind === "pipeline-overview") {
+        maxGroupWidth = Math.min(1100, available);
+        innerColumns = Math.max(1, Math.min(4, Math.floor((maxGroupWidth - 40) / (maxWidth + 22))));
+      }
       while (innerColumns > 1 && innerColumns * maxWidth + (innerColumns - 1) * 22 + 40 > maxGroupWidth) {
         innerColumns -= 1;
       }
@@ -819,6 +1398,18 @@
     var cursorY = 0;
     var rowHeight = 0;
     graph.groups.forEach(function (methodGroup) {
+      if (graph.kind === "pipeline-overview") {
+        methodGroup.left = -methodGroup.width / 2;
+        methodGroup.top = cursorY;
+        methodGroup.bottom = cursorY + methodGroup.height;
+        methodGroup.headerY = cursorY + 25;
+        methodGroup.items.forEach(function (item) {
+          item.cx = item.localX;
+          item.cy = cursorY + item.localY;
+        });
+        cursorY = methodGroup.bottom + groupGap;
+        return;
+      }
       if (cursorX > leftEdge && cursorX + methodGroup.width > available / 2) {
         cursorX = leftEdge;
         cursorY += rowHeight + groupGap;
@@ -836,12 +1427,15 @@
       rowHeight = Math.max(rowHeight, methodGroup.height);
     });
 
-    var freeItems = graph.freeItemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
-    graph.freeTop = graph.groups.length ? cursorY + rowHeight + 58 : 18;
+    var freeItems = graph.freeItemIds.map(function (id) { return itemsById[id]; }).filter(Boolean).sort(compareMethodItems);
+    graph.freeTop = graph.groups.length
+      ? graph.kind === "pipeline-overview" ? cursorY + 30 : cursorY + rowHeight + 58
+      : 18;
     graph.freeHeaderY = graph.freeTop;
     var freeY = graph.freeTop + 30;
     var maxFreeWidth = freeItems.reduce(function (width, item) { return Math.max(width, item.w); }, 164);
-    var freeColumns = Math.max(1, Math.min(4, Math.floor((available + 28) / (maxFreeWidth + 28))));
+    var maximumFreeColumns = graph.kind === "pipeline-overview" ? 12 : 4;
+    var freeColumns = Math.max(1, Math.min(maximumFreeColumns, Math.floor((available + 28) / (maxFreeWidth + 28))));
     for (var freeStart = 0; freeStart < freeItems.length; freeStart += freeColumns) {
       var freeRow = freeItems.slice(freeStart, freeStart + freeColumns);
       var freeWidth = freeRow.reduce(function (sum, item) { return sum + item.w; }, 0) + (freeRow.length - 1) * 28;
@@ -866,8 +1460,7 @@
     });
     if (!graph.items.length) return;
 
-    var rect = canvas.getBoundingClientRect();
-    var available = Math.max(420, (rect.width || 900) - 2 * MARGIN);
+    var available = 1200;
     var y = 0;
     graph.groups.forEach(function (methodGroup) {
       var groupItems = methodGroup.itemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
@@ -1015,99 +1608,9 @@
   }
 
   function compareMethodItems(left, right) {
-    return left.node.line_start - right.node.line_start || left.label.localeCompare(right.label);
-  }
-
-  // A short, constrained force settle gives the map a physical feel without
-  // letting methods escape their class compartments or making the layout
-  // wander between visits.
-  function relaxGraphLayout(graph, animate) {
-    graph.animateGravity = false;
-    if ((graph.kind !== "function" && graph.kind !== "object-overview") ||
-        graph.items.length < 2 || graph.items.length > 90) return;
-
-    var byId = {};
-    var groupById = {};
-    (graph.groups || []).forEach(function (methodGroup) { groupById[methodGroup.id] = methodGroup; });
-    graph.items.forEach(function (item) {
-      item.homeX = item.cx;
-      item.homeY = item.cy;
-      byId[item.id] = item;
-    });
-    var links = graph.edges.concat(graph.stateLinks || []);
-
-    for (var iteration = 0; iteration < 18; iteration += 1) {
-      var forces = {};
-      graph.items.forEach(function (item) {
-        forces[item.id] = {
-          x: (item.homeX - item.cx) * 0.11,
-          y: (item.homeY - item.cy) * 0.11,
-        };
-      });
-
-      links.forEach(function (link) {
-        var source = byId[link.source], target = byId[link.target];
-        if (!source || !target) return;
-        var dx = target.cx - source.cx;
-        var dy = target.cy - source.cy;
-        var distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-        var sameZone = (source.objectId || "outside") === (target.objectId || "outside");
-        var strength = sameZone ? 0.014 : 0.0025;
-        var pull = Math.max(-2.2, Math.min(2.2, (distance - 158) * strength));
-        var fx = dx / distance * pull;
-        var fy = dy / distance * pull;
-        forces[source.id].x += fx;
-        forces[source.id].y += fy;
-        forces[target.id].x -= fx;
-        forces[target.id].y -= fy;
-      });
-
-      for (var leftIndex = 0; leftIndex < graph.items.length; leftIndex += 1) {
-        var left = graph.items[leftIndex];
-        for (var rightIndex = leftIndex + 1; rightIndex < graph.items.length; rightIndex += 1) {
-          var right = graph.items[rightIndex];
-          if ((left.objectId || "outside") !== (right.objectId || "outside")) continue;
-          var pairX = right.cx - left.cx || 0.01;
-          var pairY = right.cy - left.cy || 0.01;
-          var overlapX = (left.w + right.w) / 2 + 18 - Math.abs(pairX);
-          var overlapY = (left.h + right.h) / 2 + 16 - Math.abs(pairY);
-          if (overlapX <= 0 || overlapY <= 0) continue;
-          if (overlapX < overlapY) {
-            var pushX = Math.min(3, overlapX * 0.16) * (pairX < 0 ? -1 : 1);
-            forces[left.id].x -= pushX;
-            forces[right.id].x += pushX;
-          } else {
-            var pushY = Math.min(3, overlapY * 0.16) * (pairY < 0 ? -1 : 1);
-            forces[left.id].y -= pushY;
-            forces[right.id].y += pushY;
-          }
-        }
-      }
-
-      graph.items.forEach(function (item) {
-        var force = forces[item.id];
-        var xLimit = item.objectId ? 20 : 62;
-        var yLimit = item.objectId ? 12 : 30;
-        item.cx = Math.max(item.homeX - xLimit, Math.min(item.homeX + xLimit, item.cx + Math.max(-5, Math.min(5, force.x))));
-        item.cy = Math.max(item.homeY - yLimit, Math.min(item.homeY + yLimit, item.cy + Math.max(-5, Math.min(5, force.y))));
-        var methodGroup = item.objectId && groupById[item.objectId];
-        if (methodGroup) {
-          item.cx = Math.max(methodGroup.left + item.w / 2 + 14, Math.min(methodGroup.left + methodGroup.width - item.w / 2 - 14, item.cx));
-          item.cy = Math.max(methodGroup.top + 42 + item.h / 2, Math.min(methodGroup.bottom - item.h / 2 - 14, item.cy));
-        } else if (graph.kind === "object-overview") {
-          item.cy = Math.max(graph.freeTop + 26, item.cy);
-        }
-      });
-    }
-
-    var movement = 0;
-    graph.items.forEach(function (item) {
-      item.gravityFromX = item.homeX;
-      item.gravityFromY = item.homeY;
-      movement = Math.max(movement, Math.abs(item.cx - item.homeX) + Math.abs(item.cy - item.homeY));
-    });
-    var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    graph.animateGravity = !!animate && movement > 1 && !reducedMotion;
+    return left.node.module.localeCompare(right.node.module) ||
+      left.node.line_start - right.node.line_start ||
+      left.label.localeCompare(right.label);
   }
 
   // --- draw ---------------------------------------------------------------
@@ -1134,26 +1637,26 @@
     var topologyKey = graphTopologyKey(graph);
     var topologyChanged = topologyKey !== lastTopologyKey;
     layout(graph);
-    relaxGraphLayout(graph, topologyChanged);
     if (topologyChanged) fitView(graph);
     draw(graph);
     lastTopologyKey = topologyKey;
+    syncZoomReadout();
   }
 
   function graphTopologyKey(graph) {
     return [
       state.scope,
       state.mode,
-      state.traceStart || "",
-      state.traceEnd || "",
+      state.globalView,
       graph.kind,
       graph.items.map(function (item) { return item.id; }).sort().join(","),
-      graph.edges.map(function (edgeInfo) { return edgeInfo.source + ">" + edgeInfo.target; }).sort().join(","),
+      graph.edges.map(function (edgeInfo) {
+        return (edgeInfo.sourceFunction || edgeInfo.source) + ">" + (edgeInfo.targetFunction || edgeInfo.target);
+      }).sort().join(","),
     ].join("|");
   }
 
   function draw(graph) {
-    stopGraphMotion(false);
     while (canvas.firstChild) canvas.removeChild(canvas.firstChild);
     var root = el("g");
     root.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
@@ -1166,14 +1669,14 @@
       return;
     }
 
-    // Selection is expressed with rings and semantic edge colour. The rest of
-    // the system stays fully legible instead of fading into the background.
+    // Selection is expressed with rings and path weight. The rest of the
+    // system stays fully legible instead of fading into the background.
     var lit = null;
     var center = graph.center || null;
     var groupLayer = el("g"), edgeLayer = el("g"), nodeLayer = el("g");
-    var motionNodes = {}, motionEdges = [];
     root.appendChild(groupLayer); root.appendChild(edgeLayer); root.appendChild(nodeLayer);
     if (graph.kind === "object-overview") drawObjectOverviewGroups(groupLayer, graph);
+    if (graph.kind === "pipeline-overview") drawPipelineOverviewGroups(groupLayer, graph);
     if (graph.kind === "object-method") drawObjectMethodGroups(groupLayer, graph);
     if (graph.kind === "trace") drawTraceCompartments(groupLayer, graph);
     var pos = {};
@@ -1184,114 +1687,29 @@
       if (!a || !b) return;
       var on = !lit || (lit[e.source] && lit[e.target]);
       if (a.kind === "file" || b.kind === "file") {
-        edgeLayer.appendChild(fileEdge(a, b, e, on));
+        edgeLayer.appendChild(fileEdge(a, b, e, on, graph));
         return;
       }
-      var base = e.relation === "extends" ? "edge extends-edge" : "edge";
+      var base = "edge path-edge path-" + (e.pathIndex === undefined ? 0 : e.pathIndex);
       if (graph.traceActive || graph.kind === "trace") base += e.inTrace ? " trace-edge" : " trace-context-edge";
-      var path = edge(a, b, base + (e.mutual ? " mutual" : "") + (on ? "" : " muted"), e.weight);
+      var path = edge(a, b, base + (on ? "" : " muted"), e.weight, e);
       if ((graph.traceActive || graph.kind === "trace") && e.inTrace) bindTraceEdge(path, e);
-      else if (graph.kind === "function" || graph.kind === "object-overview") bindGraphPromptEdge(path, e);
+      else if (graph.kind === "function" || graph.kind === "object-overview" || graph.kind === "pipeline-overview") bindGraphPromptEdge(path, e);
       edgeLayer.appendChild(path);
-      motionEdges.push({ element: path, source: a, target: b, kind: "call" });
-    });
-    (graph.stateLinks || []).forEach(function (link) {
-      var a = pos[link.source], b = pos[link.target];
-      if (!a || !b) return;
-      var on = !lit || (lit[link.source] && lit[link.target]);
-      var stateGroup = stateEdge(a, b, link, on);
-      edgeLayer.appendChild(stateGroup);
-      motionEdges.push({
-        element: stateGroup.motionPath,
-        label: stateGroup.motionLabel,
-        source: a,
-        target: b,
-        kind: "state",
-      });
-    });
-    (graph.clones || []).forEach(function (c) {
-      var a = pos[c.source], b = pos[c.target];
-      if (a && b) {
-        var path = edge(a, b, "clone-edge", 1);
-        edgeLayer.appendChild(path);
-        motionEdges.push({ element: path, source: a, target: b, kind: "call" });
-      }
     });
     graph.items.forEach(function (it) {
       var element;
       if (it.kind === "group") {
         element = groupBox(it, !lit || lit[it.id]);
       } else if (it.kind === "file") {
-        element = fileBox(it, !lit || lit[it.id], edgeLayer);
+        element = fileBox(it, !lit || lit[it.id]);
       } else if (it.kind === "object") {
         element = objectBox(it, !lit || lit[it.id]);
       } else {
         element = fnBox(it, !lit || lit[it.id], center);
       }
       nodeLayer.appendChild(element);
-      motionNodes[it.id] = element;
     });
-    animateGravitySettle(graph, motionNodes, motionEdges);
-  }
-
-  function stopGraphMotion(finish) {
-    if (graphLayoutFrame !== null) cancelAnimationFrame(graphLayoutFrame);
-    var complete = finishGraphMotion;
-    graphLayoutFrame = null;
-    finishGraphMotion = null;
-    if (finish && complete) complete();
-  }
-
-  function animateGravitySettle(graph, nodes, edges) {
-    if (!graph.animateGravity) return;
-    var startedAt = performance.now();
-    var duration = 460;
-
-    function renderFrame(progress) {
-      var eased = progress >= 1 ? 1 : 1 - (1 + 7 * progress) * Math.exp(-7 * progress);
-      var positions = {};
-      graph.items.forEach(function (item) {
-        var x = item.gravityFromX + (item.cx - item.gravityFromX) * eased;
-        var y = item.gravityFromY + (item.cy - item.gravityFromY) * eased;
-        positions[item.id] = {
-          cx: x,
-          cy: y,
-          w: item.w,
-          h: item.h,
-          layer: item.layer,
-        };
-        if (nodes[item.id]) {
-          nodes[item.id].setAttribute("transform", "translate(" + (x - item.w / 2) + "," + (y - item.h / 2) + ")");
-        }
-      });
-      edges.forEach(function (motionEdge) {
-        var source = positions[motionEdge.source.id];
-        var target = positions[motionEdge.target.id];
-        if (!source || !target) return;
-        motionEdge.element.setAttribute("d", motionEdge.kind === "state"
-          ? stateEdgePath(source, target)
-          : edgePath(source, target));
-        if (motionEdge.label) {
-          var labelPosition = stateEdgeLabelPosition(source, target);
-          motionEdge.label.setAttribute("x", labelPosition.x);
-          motionEdge.label.setAttribute("y", labelPosition.y);
-        }
-      });
-    }
-
-    finishGraphMotion = function () { renderFrame(1); };
-    renderFrame(0);
-    function step(now) {
-      var progress = Math.min(1, (now - startedAt) / duration);
-      renderFrame(progress);
-      if (progress < 1) {
-        graphLayoutFrame = requestAnimationFrame(step);
-      } else {
-        graphLayoutFrame = null;
-        finishGraphMotion = null;
-      }
-    }
-    graphLayoutFrame = requestAnimationFrame(step);
   }
 
   function drawObjectOverviewGroups(layer, graph) {
@@ -1303,13 +1721,11 @@
         background.classList.add("selected");
       }
       layer.appendChild(background);
-      var titlePrefix = methodGroup.traceContext ? "TRACE CLASS / " : "CLASS / ";
-      var titleSpace = methodGroup.traceContext ? 154 : 126;
       var title = text(
         methodGroup.left + 14,
         methodGroup.headerY,
         "object-compartment-title",
-        titlePrefix + truncate(methodGroup.label, Math.max(10, Math.floor((methodGroup.width - titleSpace) / 6.3)))
+        "CLASS / " + truncate(methodGroup.label, Math.max(10, Math.floor((methodGroup.width - 126) / 6.3)))
       );
       title.setAttribute("data-object-focus", methodGroup.id);
       makeSvgButton(title, "Inspect class " + methodGroup.label, function (event) {
@@ -1317,9 +1733,7 @@
         selectObject(methodGroup.id);
       });
       layer.appendChild(title);
-      var countLabel = methodGroup.traceContext
-        ? methodGroup.itemIds.length + " SHOWN"
-        : methodGroup.itemIds.length + (methodGroup.itemIds.length === 1 ? " METHOD" : " METHODS");
+      var countLabel = methodGroup.itemIds.length + (methodGroup.itemIds.length === 1 ? " METHOD" : " METHODS");
       var count = text(
         methodGroup.left + methodGroup.width - 14,
         methodGroup.headerY,
@@ -1337,6 +1751,38 @@
     }
   }
 
+  function drawPipelineOverviewGroups(layer, graph) {
+    graph.groups.forEach(function (pipelineGroup, index) {
+      var background = rect(pipelineGroup.width, pipelineGroup.height, "pipeline-compartment-box");
+      background.setAttribute("x", pipelineGroup.left);
+      background.setAttribute("y", pipelineGroup.top);
+      layer.appendChild(background);
+      layer.appendChild(text(
+        pipelineGroup.left + 14,
+        pipelineGroup.headerY,
+        "pipeline-compartment-title",
+        "PIPELINE " + String(index + 1).padStart(2, "0") + " / " +
+          truncate(pipelineGroup.label, Math.max(18, Math.floor((pipelineGroup.width - 190) / 6.3)))
+      ));
+      var count = text(
+        pipelineGroup.left + pipelineGroup.width - 14,
+        pipelineGroup.headerY,
+        "pipeline-compartment-count",
+        pipelineGroup.itemIds.length + " FUNCTIONS"
+      );
+      count.setAttribute("text-anchor", "end");
+      layer.appendChild(count);
+    });
+    if (graph.freeItemIds.length) {
+      layer.appendChild(text(
+        graph.leftEdge,
+        graph.freeHeaderY,
+        "outside-functions-title pipeline-outside-title",
+        "NOT IN A ROOTED PIPELINE / ORPHANS · " + graph.freeItemIds.length
+      ));
+    }
+  }
+
   function drawObjectMethodGroups(layer, graph) {
     graph.groups.forEach(function (methodGroup) {
       var background = rect(methodGroup.width, methodGroup.bottom - methodGroup.top, "method-group-box");
@@ -1351,7 +1797,7 @@
         layer.appendChild(text(methodGroup.left + 14, methodGroup.emptyY, "method-group-empty", message));
       }
     });
-    var legend = text(graph.groups[0].left, graph.groups[0].top - 14, "method-map-legend", "solid = resolved call   dashed = shared initialized state");
+    var legend = text(graph.groups[0].left, graph.groups[0].top - 14, "method-map-legend", "resolved call paths");
     layer.appendChild(legend);
   }
 
@@ -1422,22 +1868,27 @@
     return parts.join("  ");
   }
 
-  function fileBox(it, on, edgeLayer) {
+  function fileBox(it, on) {
     var node = it.node, card = it.card;
-    var g = group("node file-node" + (on ? "" : " muted"), it.cx - it.w / 2, it.cy - it.h / 2);
+    var selectedFile = state.graphSelectionType === "file" && state.graphSelection === it.id;
+    var g = group("node file-node" + (card.global ? " global-file" : "") +
+      (it.isExample ? " example-file" : "") + (it.isOrchestrator ? " orchestrator-file" : "") +
+      (it.traceFile ? " trace-file" : "") + (selectedFile ? " selected-file" : "") +
+      (on ? "" : " muted"), it.cx - it.w / 2, it.cy - it.h / 2);
     g.setAttribute("role", "group");
     g.setAttribute("aria-label", "Module " + node.path);
     g.appendChild(rect(it.w, it.h, "file-rect"));
     var accent = line(1, 42, 49, 42, "file-accent");
-    accent.style.stroke = "var(--file-hue-" + card.hue + ")";
-    var moduleLabel = text(10, 18, "node-name", truncate(node.name + ".py", card.chars));
+    var fileLabel = (card.global ? "FILE / " : "") + node.name + ".py";
+    var moduleLabel = text(10, 18, "node-name", truncate(fileLabel, card.chars));
     moduleLabel.setAttribute("data-scope-focus", node.path);
     makeSvgButton(moduleLabel, "Open module " + node.path, function (event) {
       event.stopPropagation();
       setScope(node.path);
     });
     g.appendChild(moduleLabel);
-    g.appendChild(text(10, 34, "node-meta", groupMeta(node)));
+    var metadata = card.global ? globalFileMeta(it) : groupMeta(node);
+    g.appendChild(text(10, 34, "node-meta", truncate(metadata, card.chars + 8)));
     g.appendChild(line(0, 42, it.w, 42, "object-divider"));
     g.appendChild(accent);
 
@@ -1447,7 +1898,10 @@
         return;
       }
       g.appendChild(line(0, row.y - 4, 8, row.y - 4, row.unused ? "file-tick unused" : "file-tick"));
-      var label = text(12, row.y, "file-fn", truncate(row.name, card.chars));
+      var rowClass = "file-fn";
+      if (card.traceFunctionIds && card.traceFunctionIds[row.id]) rowClass += " trace-function";
+      if (state.graphSelectionType === "function" && state.graphSelection === row.id) rowClass += " selected";
+      var label = text(12, row.y, rowClass, truncate(row.name, card.chars));
       label.setAttribute("data-function-focus", row.id);
       makeSvgButton(label, "Inspect function " + row.name, function (event) {
         event.stopPropagation();
@@ -1456,29 +1910,40 @@
       g.appendChild(label);
     });
 
-    g.addEventListener("click", function (ev) { ev.stopPropagation(); setScope(node.path); });
-    g.addEventListener("pointerenter", function () { litFileEdges(edgeLayer, it.id, true); });
-    g.addEventListener("pointerleave", function () { litFileEdges(edgeLayer, it.id, false); });
+    g.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (card.global) selectGlobalFile(node.path);
+      else setScope(node.path);
+    });
     return g;
   }
 
-  function litFileEdges(edgeLayer, id, on) {
-    if (!edgeLayer) return;
-    edgeLayer.querySelectorAll(".file-edge").forEach(function (p) {
-      var touches = p.getAttribute("data-src") === id || p.getAttribute("data-tgt") === id;
-      p.classList.toggle("lit", on && touches);
-      p.classList.toggle("dim", on && !touches);
-    });
+  function globalFileMeta(item) {
+    var labels = [];
+    if (item.isExample) labels.push("EXAMPLE · main()");
+    if (item.isOrchestrator) labels.push("ORCHESTRATOR · " + item.importedFunctionCount + " imports");
+    if (!labels.length) labels.push(item.card.rows.length + " functions");
+    return labels.join(" / ");
   }
 
-  // Edge between file cards: anchored at the specific function row when that
-  // function is listed, tinted with the source file's hue, faint by default.
-  function fileEdge(a, b, e, on) {
-    var src = rowAnchor(a, b, e.srcCounts);
-    var tgt = rowAnchor(b, a, e.tgtCounts);
+  // Edge between file cards, anchored at the exact source and target rows and
+  // routed as an independently identifiable coloured path.
+  function fileEdge(a, b, e, on, graph) {
+    var src = e.sourceFunction
+      ? functionRowAnchor(a, e.sourceFunction, b.cx >= a.cx ? 1 : -1, e.sourcePortOffset)
+      : rowAnchor(a, b, e.srcCounts);
+    var tgt = e.targetFunction
+      ? functionRowAnchor(b, e.targetFunction, b.cx >= a.cx ? -1 : 1, e.targetPortOffset)
+      : rowAnchor(b, a, e.tgtCounts);
     var p = el("path");
     var d;
-    if (src && tgt) {
+    if (graph.kind === "global" && src && tgt) {
+      d = globalEdgePath(src, tgt, a, b, e, graph);
+    } else if (src && tgt && e.route === "corridor") {
+      d = "M" + src.x + "," + src.y + " V" + e.routeY + " H" + tgt.x + " V" + tgt.y;
+    } else if (src && tgt && e.route === "outer") {
+      d = "M" + src.x + "," + src.y + " H" + e.routeX + " V" + tgt.y + " H" + tgt.x;
+    } else if (src && tgt) {
       var reach = Math.max(34, Math.min(90, Math.abs(tgt.x - src.x) / 3));
       d = "M" + src.x + "," + src.y +
         " C" + (src.x + src.side * reach) + "," + src.y +
@@ -1489,18 +1954,50 @@
       d = "M" + a.cx + "," + (a.cy + a.h / 2) + " C" + a.cx + "," + midY + " " + b.cx + "," + midY + " " + b.cx + "," + (b.cy - b.h / 2);
     }
     p.setAttribute("d", d);
-    p.setAttribute("class", "edge file-edge" + (e.mutual ? " mutual" : "") + (on ? "" : " muted"));
+    var selectedFileEdge = state.graphSelectionType === "file" &&
+      (state.graphSelection === e.source || state.graphSelection === e.target);
+    var cls = "edge file-edge path-edge path-" + (e.pathIndex === undefined ? 0 : e.pathIndex) + (on ? "" : " muted");
+    if (graph.traceActive) cls += e.inTrace ? " trace-edge" : " trace-context-edge";
+    if (state.graphSelectionType === "file") cls += selectedFileEdge ? " file-selection-edge" : " trace-context-edge";
+    p.setAttribute("class", cls);
     p.setAttribute("data-src", e.source);
     p.setAttribute("data-tgt", e.target);
-    var hue = a.card ? a.card.hue : hueIndex(String(e.source));
-    if (!e.mutual) {
-      p.style.stroke = "var(--file-hue-" + hue + ")";
-      p.setAttribute("marker-end", "url(#arrow-hue-" + hue + ")");
-    } else {
-      p.setAttribute("marker-end", "url(#arrow-red)");
-    }
-    if (e.weight > 1) p.setAttribute("stroke-width", Math.min(1.2 + e.weight * 0.35, 4));
+    p.setAttribute("data-source-function", e.sourceFunction || "");
+    p.setAttribute("data-target-function", e.targetFunction || "");
+    p.setAttribute("data-path-id", e.pathId === undefined ? "" : e.pathId);
+    p.setAttribute("marker-end", "url(#arrow-path-" + (e.pathIndex === undefined ? 0 : e.pathIndex) + ")");
     return p;
+  }
+
+  function functionRowAnchor(item, functionId, side, offset) {
+    return {
+      x: item.cx + side * item.w / 2,
+      y: item.cy - item.h / 2 + item.card.rowY[functionId] + (offset || 0),
+      side: side,
+    };
+  }
+
+  function globalEdgePath(source, target, sourceItem, targetItem, edgeInfo, graph) {
+    if (edgeInfo.route === "corridor") {
+      return "M" + source.x + "," + source.y +
+        " H" + edgeInfo.routeX +
+        " V" + target.y +
+        " H" + target.x;
+    }
+    var sourceBounds = graph.layerBounds[sourceItem.layer];
+    var targetBounds = graph.layerBounds[targetItem.layer];
+    var sourceRail = source.side > 0
+      ? sourceBounds.right + 28 + (edgeInfo.sourceRailOffset || 0)
+      : sourceBounds.left - 28 - (edgeInfo.sourceRailOffset || 0);
+    var targetRail = target.side > 0
+      ? targetBounds.right + 28 + (edgeInfo.targetRailOffset || 0)
+      : targetBounds.left - 28 - (edgeInfo.targetRailOffset || 0);
+    return "M" + source.x + "," + source.y +
+      " H" + sourceRail +
+      " V" + edgeInfo.routeY +
+      " H" + targetRail +
+      " V" + target.y +
+      " H" + target.x;
   }
 
   function rowAnchor(item, other, counts) {
@@ -1534,7 +2031,7 @@
     if (it.traceRole === "start" || it.traceRole === "end") {
       g.appendChild(text(0, -9, "trace-node-label", it.traceRole === "start" ? "ORIGIN" : "TARGET"));
     }
-    g.appendChild(text(10, 18, "node-name", truncate(node.name, 19)));
+    g.appendChild(text(10, 18, "node-name", truncate(it.label, 24)));
     g.appendChild(text(10, 33, "node-meta", roleLabel(node)));
     makeSvgButton(g, "Inspect function " + (node.qualified_name || node.name), function (event) {
       event.stopPropagation();
@@ -1663,74 +2160,47 @@
     root.appendChild(text(12, h - 11, "object-state", truncate("state: " + labels.join("  "), chars + 6)));
   }
 
-  function edge(a, b, cls, weight) {
+  function edge(a, b, cls, weight, edgeInfo) {
     var p = el("path");
-    p.setAttribute("d", edgePath(a, b));
+    p.setAttribute("d", edgePath(a, b, edgeInfo));
     p.setAttribute("class", cls);
+    if (edgeInfo) {
+      p.setAttribute("data-src", edgeInfo.source);
+      p.setAttribute("data-tgt", edgeInfo.target);
+      p.setAttribute("data-path-id", edgeInfo.pathId === undefined ? "" : edgeInfo.pathId);
+    }
     if (cls.indexOf("clone") === -1) {
-      p.setAttribute("marker-end", cls.indexOf("trace-edge") >= 0
-        ? "url(#arrow-trace)"
-        : cls.indexOf("mutual") >= 0 ? "url(#arrow-red)" : "url(#arrow)");
-      if (weight > 1) p.setAttribute("stroke-width", Math.min(1.2 + weight * 0.35, 4));
+      var markerId = edgeInfo && edgeInfo.pathIndex !== undefined ? "arrow-path-" + edgeInfo.pathIndex : "arrow-path-0";
+      p.setAttribute("marker-end", "url(#" + markerId + ")");
     }
     return p;
   }
 
-  function edgePath(a, b) {
+  function edgePath(a, b, edgeInfo) {
     var ah = a.h || NODE_H;
     var bh = b.h || NODE_H;
-    var x1 = a.cx, y1 = a.cy + ah / 2, x2 = b.cx, y2 = b.cy - bh / 2;
-    var span = a.layer !== undefined && b.layer !== undefined ? Math.abs(a.layer - b.layer) : 1;
-    var d;
-    if (span > 1) {
-      // Bow long edges sideways so they pass beside intermediate layers
-      // instead of cutting through them. Rows are centred on x = 0, so the
-      // endpoints' side of that midline picks the bow direction.
-      var side = (x1 + x2) / 2 >= 0 ? 1 : -1;
-      var bow = 46 + span * 22;
-      var bx1 = x1 + side * bow, bx2 = x2 + side * bow;
-      d = "M" + x1 + "," + y1 +
-        " C" + bx1 + "," + (y1 + (y2 - y1) * 0.3) +
-        " " + bx2 + "," + (y1 + (y2 - y1) * 0.7) +
-        " " + x2 + "," + y2;
-    } else {
-      var midY = (y1 + y2) / 2;
-      d = "M" + x1 + "," + y1 + " C" + x1 + "," + midY + " " + x2 + "," + midY + " " + x2 + "," + y2;
+    var x1 = a.cx + ((edgeInfo && edgeInfo.sourcePortOffset) || 0);
+    var y1 = a.cy + ah / 2;
+    var x2 = b.cx + ((edgeInfo && edgeInfo.targetPortOffset) || 0);
+    var y2 = b.cy - bh / 2;
+    if (edgeInfo && edgeInfo.route === "corridor") {
+      return "M" + x1 + "," + y1 +
+        " V" + edgeInfo.routeY +
+        " H" + x2 +
+        " V" + y2;
     }
-    return d;
-  }
-
-  function stateEdge(a, b, link, on) {
-    var p = el("path");
-    p.setAttribute("d", stateEdgePath(a, b));
-    p.setAttribute("class", "edge state-edge" + (on ? "" : " muted"));
-    p.setAttribute("data-state-fields", link.fields.join(", "));
-    var labelPosition = stateEdgeLabelPosition(a, b);
-    var label = text(labelPosition.x, labelPosition.y, "state-edge-label" + (on ? "" : " muted"), "state: " + link.fields.join(", "));
-    var groupNode = el("g");
-    groupNode.appendChild(p);
-    groupNode.appendChild(label);
-    groupNode.motionPath = p;
-    groupNode.motionLabel = label;
-    return groupNode;
-  }
-
-  function stateEdgePath(a, b) {
-    var y1 = a.cy + (a.h || NODE_H) / 2;
-    var y2 = b.cy - (b.h || NODE_H) / 2;
-    var side = a.cx <= b.cx ? -1 : 1;
-    var bow = 54;
-    return "M" + a.cx + "," + y1 +
-      " C" + (a.cx + side * bow) + "," + (y1 + 24) +
-      " " + (b.cx + side * bow) + "," + (y2 - 24) +
-      " " + b.cx + "," + y2;
-  }
-
-  function stateEdgeLabelPosition(a, b) {
-    var y1 = a.cy + (a.h || NODE_H) / 2;
-    var y2 = b.cy - (b.h || NODE_H) / 2;
-    var side = a.cx <= b.cx ? -1 : 1;
-    return { x: (a.cx + b.cx) / 2 + side * 54, y: (y1 + y2) / 2 - 4 };
+    if (edgeInfo && edgeInfo.route === "outer") {
+      var sourceExit = y1 + 24;
+      var targetEntry = y2 - 24;
+      return "M" + x1 + "," + y1 +
+        " V" + sourceExit +
+        " H" + edgeInfo.routeX +
+        " V" + targetEntry +
+        " H" + x2 +
+        " V" + y2;
+    }
+    var midY = (y1 + y2) / 2;
+    return "M" + x1 + "," + y1 + " V" + midY + " H" + x2 + " V" + y2;
   }
 
   // --- breadcrumb + tools -------------------------------------------------
@@ -1761,69 +2231,61 @@
 
   function renderTools() {
     var graph = currentGraph();
-    if (graph.kind === "object-method") {
-      renderObjectMethodTools(graph);
-      return;
-    }
     var scopedNode = treeByPath[state.scope] || tree;
-    var objectModeAvailable = scopeObjects(scopedNode).length > 0;
+    var objectModeAvailable = scopedNode.type === "module" && scopeObjects(scopedNode).length > 0;
     var label = "files";
     if (graph.kind === "object") label = "objects";
-    if (graph.kind === "function" || graph.kind === "object-overview") label = "visible functions";
-    var focusAvailable = !!state.focus || (state.graphSelectionType === "function" && !!nodeById[state.graphSelection]);
+    if (graph.kind === "function" || graph.kind === "object-overview" || graph.kind === "pipeline-overview") label = "visible functions";
+    var count = graph.kind === "global"
+      ? graph.items.length + " files · " + graph.edges.length + " cross-file calls"
+      : graph.kind === "pipeline-overview"
+        ? graph.items.length + " functions · " + graph.groups.length + " pipeline groups · " + graph.freeItemIds.length + " unassigned"
+      : graph.items.length + " " + label;
     document.getElementById("tools").innerHTML =
-      '<span class="count">' + graph.items.length + " " + label + "</span>" +
-      modeToggle(objectModeAvailable) +
-      disabledCountButton() +
+      modeToggle(scopedNode, objectModeAvailable) +
+      (state.mode === "global" ? globalViewToggle() : "") +
+      '<span class="count">' + count + "</span>" +
+      edgeLegend() +
       '<div class="zoom-control" aria-label="Graph zoom">' +
         '<button id="zoomOut" class="tool tool-icon" aria-label="Zoom out" title="Zoom out">−</button>' +
         '<span id="zoomReadout" class="zoom-readout">' + zoomLabel() + "</span>" +
         '<button id="zoomIn" class="tool tool-icon" aria-label="Zoom in" title="Zoom in">+</button>' +
       "</div>" +
-      '<button id="focusSelected" class="tool"' + (focusAvailable ? "" : " disabled") + '>' + (state.focus ? "clear focus" : "focus selection") + "</button>" +
-      '<button id="reset" class="tool">fit</button>' +
-      graphPromptTools(graph);
+      '<button id="reset" class="tool">Fit graph</button>';
     document.getElementById("reset").addEventListener("click", function () { redraw(true); });
     document.getElementById("zoomOut").addEventListener("click", function () { zoomBy(1 / 1.2); });
     document.getElementById("zoomIn").addEventListener("click", function () { zoomBy(1.2); });
-    document.getElementById("focusSelected").addEventListener("click", function () { if (focusAvailable) toggleFocus(); });
-    document.getElementById("modeFunctions").addEventListener("click", function () { setMode("functions"); });
+    document.getElementById("modeFiles").addEventListener("click", showFilesGraph);
+    var functionButton = document.getElementById("modeFunctions");
+    functionButton.addEventListener("click", function () { if (!functionButton.disabled) setMode("functions"); });
     var objectButton = document.getElementById("modeObjects");
-    if (objectButton) objectButton.addEventListener("click", function () { if (objectModeAvailable) setMode("objects"); });
-    var reactivate = document.getElementById("reactivateAll");
-    if (reactivate) reactivate.addEventListener("click", function () {
-      state.disabled = {};
-      rerender();
-    });
-    bindGraphPromptToolbar(graph);
+    objectButton.addEventListener("click", function () { if (!objectButton.disabled) setMode("objects"); });
+    document.getElementById("modeGlobal").addEventListener("click", function () { setMode("global"); });
+    var globalFilesButton = document.getElementById("globalFiles");
+    if (globalFilesButton) globalFilesButton.addEventListener("click", function () { setGlobalView("files"); });
+    var globalPipelinesButton = document.getElementById("globalPipelines");
+    if (globalPipelinesButton) globalPipelinesButton.addEventListener("click", function () { setGlobalView("pipelines"); });
     document.getElementById("hint").textContent = graph.traceActive
-      ? "TRACE ACTIVE / all scoped functions remain visible / Shift-click a target / drag to pan / scroll to zoom"
-      : state.mode === "objects"
-        ? "drag to pan · scroll or use +/− to zoom · click a method to trace from it · click empty space to clear"
-        : "drag to pan · scroll or use +/− to zoom · click a function to trace from it · Shift-click to set a target · click empty space to clear";
+      ? "Trace highlighted · Shift-click a target · layout remains fixed"
+      : graph.kind === "global"
+        ? "Cross-file calls · click a file or function to highlight · drag and zoom are manual"
+        : graph.kind === "pipeline-overview"
+          ? "Rooted pipeline groups · all remaining functions stay visible · drag and zoom are manual"
+        : "Click a function to highlight calls · Shift-click sets a target · drag and zoom are manual";
   }
 
-  function renderObjectMethodTools(graph) {
-    var tools = document.getElementById("tools");
-    tools.innerHTML =
-      '<span class="count object-method-count">' + escape(graph.object.name) + " · " + graph.items.length + " methods</span>" +
-      '<button id="backToObjectRelationships" class="tool tool-primary">Back to object relationships</button>' +
-      '<div class="zoom-control" aria-label="Graph zoom">' +
-        '<button id="zoomOut" class="tool tool-icon" aria-label="Zoom out" title="Zoom out">−</button>' +
-        '<span id="zoomReadout" class="zoom-readout">' + zoomLabel() + "</span>" +
-        '<button id="zoomIn" class="tool tool-icon" aria-label="Zoom in" title="Zoom in">+</button>' +
-      "</div>" +
-      '<button id="reset" class="tool">fit</button>';
-    document.getElementById("backToObjectRelationships").addEventListener("click", backToObjectRelationships);
-    document.getElementById("reset").addEventListener("click", function () { redraw(true); });
-    document.getElementById("zoomOut").addEventListener("click", function () { zoomBy(1 / 1.2); });
-    document.getElementById("zoomIn").addEventListener("click", function () { zoomBy(1.2); });
-    document.getElementById("hint").textContent =
-      "drag to pan · scroll or use +/− to zoom · click a method to inspect its callers and callees";
+  function edgeLegend() {
+    return '<div class="edge-legend" aria-label="Independent call path colours">' +
+      '<span class="legend-path-0">Path 1</span>' +
+      '<span class="legend-path-1">Path 2</span>' +
+      '<span class="legend-path-2">Path 3</span>' +
+      '<span class="legend-path-3">Path 4</span>' +
+      '<span class="legend-path-4">Path 5</span>' +
+    "</div>";
   }
 
   function graphPromptTools(graph) {
-    if ((graph.kind !== "function" && graph.kind !== "object-overview") || state.graphPromptSelection.length < 2) return "";
+    if ((graph.kind !== "function" && graph.kind !== "object-overview" && graph.kind !== "pipeline-overview") || state.graphPromptSelection.length < 2) return "";
     var pipeline = graphPromptPipelineOrder(state.graphPromptSelection, graph.edges);
     return '<div class="graph-prompt-tools" role="group" aria-label="Graph prompt selection">' +
       '<span class="graph-prompt-count">' + state.graphPromptSelection.length + " selected</span>" +
@@ -2076,7 +2538,7 @@
       '<output class="trace-route">' + escape(routeText) + "</output>" +
       '<div class="trace-dock-actions">' +
         (state.traceEnd ? '<button type="button" data-trace-swap>Swap</button>' : "") +
-        '<button type="button" data-trace-clear>Clear</button>' +
+        '<button type="button" data-trace-clear>Clear trace</button>' +
       "</div>";
     var swap = traceDock.querySelector("[data-trace-swap]");
     if (swap) swap.addEventListener("click", swapTrace);
@@ -2278,6 +2740,7 @@
       navigationSurface: state.navigationSurface,
       scope: state.scope,
       mode: state.mode,
+      globalView: state.globalView,
       focus: state.focus,
       graphSelection: state.graphSelection,
       graphSelectionType: state.graphSelectionType,
@@ -2301,6 +2764,7 @@
     state.navigationSurface = snapshot.navigationSurface || "city";
     state.scope = snapshot.scope;
     state.mode = snapshot.mode;
+    state.globalView = snapshot.globalView || "files";
     state.focus = snapshot.focus;
     state.graphSelection = snapshot.graphSelection;
     state.graphSelectionType = snapshot.graphSelectionType;
@@ -2677,10 +3141,21 @@
     selectFunction(id);
   }
 
-  function modeToggle(objectModeAvailable) {
+  function modeToggle(scopedNode, objectModeAvailable) {
+    var moduleScope = scopedNode.type === "module";
+    var filesActive = state.mode === "functions" && !moduleScope;
     return '<div class="mode-toggle" aria-label="Graph mode">' +
-      '<button id="modeFunctions" class="mode-button' + (state.mode === "functions" ? " active" : "") + '">Functions</button>' +
-      '<button id="modeObjects" class="mode-button' + (state.mode === "objects" ? " active" : "") + (objectModeAvailable ? "" : " disabled") + '">Objects</button>' +
+      '<button id="modeFiles" class="mode-button' + (filesActive ? " active" : "") + '">Files</button>' +
+      '<button id="modeFunctions" class="mode-button' + (state.mode === "functions" && moduleScope ? " active" : "") + '"' + (moduleScope ? "" : " disabled") + '>Functions</button>' +
+      '<button id="modeObjects" class="mode-button' + (state.mode === "objects" ? " active" : "") + '"' + (objectModeAvailable ? "" : " disabled") + '>Objects</button>' +
+      '<button id="modeGlobal" class="mode-button' + (state.mode === "global" ? " active" : "") + '">Global calls</button>' +
+      "</div>";
+  }
+
+  function globalViewToggle() {
+    return '<div class="mode-toggle global-view-toggle" aria-label="Global call presentation">' +
+      '<button id="globalFiles" class="mode-button' + (state.globalView === "files" ? " active" : "") + '">File bounds</button>' +
+      '<button id="globalPipelines" class="mode-button' + (state.globalView === "pipelines" ? " active" : "") + '">Pipelines</button>' +
       "</div>";
   }
 
@@ -2827,6 +3302,7 @@
       clearGraphSelection();
       return;
     }
+    var globalMode = state.mode === "global";
     var preferObjects = state.mode === "objects";
     var modulePath = moduleOf(id);
     var moduleNode = treeByPath[modulePath] || tree;
@@ -2834,17 +3310,34 @@
     state.traceStart = id;
     state.traceEnd = null;
     state.workspace = "graph";
-    state.mode = (preferObjects && scopeObjects(moduleNode).length) || objectDominated(moduleNode)
-      ? "objects"
-      : "functions";
+    if (!globalMode) {
+      state.mode = preferObjects && scopeObjects(moduleNode).length ? "objects" : "functions";
+    }
     state.focus = null;
     state.objectFocus = null;
     state.graphSelection = id;
     state.graphSelectionType = "function";
     state.detailSelection = { type: "function", id: id };
     state.hovered = null;
-    state.scope = modulePath;
-    expandTo(state.scope);
+    if (!globalMode) state.scope = modulePath;
+    expandTo(modulePath);
+    rerender();
+  }
+
+  function selectGlobalFile(modulePath) {
+    if (state.mode !== "global" || !treeByPath[modulePath]) return;
+    if (state.graphSelectionType === "file" && state.graphSelection === modulePath) {
+      clearGraphSelection();
+      return;
+    }
+    clearGraphPromptState();
+    clearTraceState();
+    state.graphSelection = modulePath;
+    state.graphSelectionType = "file";
+    state.detailSelection = null;
+    state.focus = null;
+    state.objectFocus = null;
+    state.hovered = null;
     rerender();
   }
 
@@ -2916,6 +3409,32 @@
     return treeByPath[m] ? m : state.scope;
   }
 
+  function resolveImportBase(currentModule, importedModule, level) {
+    if (!level) return importedModule;
+    var currentParts = currentModule.split(".");
+    var parts = currentParts.slice(0, Math.max(0, currentParts.length - level));
+    if (importedModule) parts = parts.concat(importedModule.split("."));
+    return parts.filter(Boolean).join(".");
+  }
+
+  function showFilesGraph() {
+    if (state.mode === "functions" && state.scope === tree.path && !state.graphSelection && !state.traceStart) return;
+    recordNavigation();
+    clearGraphPromptState();
+    clearTraceState();
+    state.workspace = "graph";
+    state.scope = tree.path;
+    state.mode = "functions";
+    state.focus = null;
+    state.graphSelection = null;
+    state.graphSelectionType = null;
+    state.detailSelection = null;
+    state.sourceRange = null;
+    state.objectFocus = null;
+    state.hovered = null;
+    rerender();
+  }
+
   function setMode(mode) {
     if (state.mode === mode) return;
     clearGraphPromptState();
@@ -2928,18 +3447,19 @@
     state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
+    if (mode === "global") state.scope = tree.path;
     expandTo(tree.path);
     rerender();
   }
 
-  function toggleFocus() {
-    clearGraphPromptState();
-    clearTraceState();
-    if (state.focus) {
-      state.focus = null;
-    } else if (state.graphSelectionType === "function" && nodeById[state.graphSelection]) {
-      state.focus = state.graphSelection;
+  function setGlobalView(viewName) {
+    if ((viewName !== "files" && viewName !== "pipelines") || state.globalView === viewName) return;
+    state.globalView = viewName;
+    if (viewName === "pipelines" && state.graphSelectionType === "file") {
+      state.graphSelection = null;
+      state.graphSelectionType = null;
     }
+    state.hovered = null;
     rerender();
   }
 
@@ -2947,10 +3467,6 @@
     state.navigationCollapsed = !state.navigationCollapsed;
     renderHead();
     rerender();
-  }
-
-  function bindToolbarActions() {
-    document.getElementById("fullGraph").addEventListener("click", showFullGraph);
   }
 
   function bindDetailResize() {
@@ -3005,24 +3521,6 @@
     if (!window.matchMedia || window.matchMedia("(min-width: 1121px)").matches) setPanelWidth(panelWidth());
   }
 
-  function showFullGraph() {
-    if (state.workspace === "graph" && state.scope === tree.path && !state.focus && !state.graphSelection && !state.detailSelection && !state.traceStart) return;
-    recordNavigation();
-    clearGraphPromptState();
-    clearTraceState();
-    state.workspace = "graph";
-    state.scope = tree.path;
-    state.mode = "functions";
-    state.focus = null;
-    state.graphSelection = null;
-    state.graphSelectionType = null;
-    state.detailSelection = null;
-    state.sourceRange = null;
-    state.objectFocus = null;
-    state.hovered = null;
-    rerender();
-  }
-
   function selectObject(id) {
     if (!objectById[id]) return;
     if (state.graphSelectionType === "object" && state.graphSelection === id &&
@@ -3054,18 +3552,6 @@
     startTrace(methodId);
   }
 
-  function backToObjectRelationships() {
-    if (!state.objectFocus) return;
-    recordNavigation();
-    clearGraphPromptState();
-    state.objectFocus = null;
-    state.graphSelection = null;
-    state.graphSelectionType = null;
-    state.focus = null;
-    state.mode = "objects";
-    rerender();
-  }
-
   // --- source inspector + city-map rail ----------------------------------
 
   function renderDetail() {
@@ -3094,7 +3580,6 @@
     shell.classList.add("source-open");
     if (selection.type === "object" && objectById[selection.id]) {
       renderObjectDetail(panel, objectById[selection.id]);
-      if (detailChanged) focusNewDetail(panel);
       return;
     }
     if (selection.type !== "function" || !nodeById[selection.id]) {
@@ -3118,16 +3603,6 @@
       });
     panel.querySelector(".detail-close").addEventListener("click", clearGraphSelection);
     bindInlinePromptActions(panel, node.id);
-    if (detailChanged) focusNewDetail(panel);
-  }
-
-  function focusNewDetail(panel) {
-    if (detailFocusFrame !== null) cancelAnimationFrame(detailFocusFrame);
-    detailFocusFrame = requestAnimationFrame(function () {
-      detailFocusFrame = null;
-      var close = panel.querySelector(".detail-close");
-      if (!panel.hidden && close) close.focus();
-    });
   }
 
   function renderReviewPromptPanel() {
@@ -3462,10 +3937,6 @@
 
   function clearGraphSelection() {
     var closedSelection = state.detailSelection;
-    if (detailFocusFrame !== null) {
-      cancelAnimationFrame(detailFocusFrame);
-      detailFocusFrame = null;
-    }
     clearGraphPromptState();
     resetInlinePrompt();
     clearTraceState();
@@ -3486,7 +3957,7 @@
   }
 
   function detailFocusTarget(selection) {
-    if (!selection) return document.getElementById("fullGraph");
+    if (!selection) return document.getElementById("modeGlobal");
     var attribute = selection.type === "object" ? "data-object-focus" : "data-function-focus";
     var candidates = document.querySelectorAll("[" + attribute + "]");
     for (var index = 0; index < candidates.length; index += 1) {
@@ -3494,7 +3965,7 @@
         return candidates[index];
       }
     }
-    return document.getElementById("fullGraph");
+    return document.getElementById("modeGlobal");
   }
 
   function renderObjectDetail(card, object) {
@@ -3787,7 +4258,6 @@
       } else {
         view = { x: MARGIN, y: MARGIN, scale: 1 };
       }
-      syncViewportTarget();
       return;
     }
     var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -3803,7 +4273,7 @@
         maxY = Math.max(maxY, methodGroup.bottom);
       });
     }
-    if (graph.kind === "object-overview") {
+    if (graph.kind === "object-overview" || graph.kind === "pipeline-overview") {
       graph.groups.forEach(function (methodGroup) {
         minX = Math.min(minX, methodGroup.left);
         maxX = Math.max(maxX, methodGroup.left + methodGroup.width);
@@ -3820,27 +4290,25 @@
         maxY = Math.max(maxY, compartment.top + compartment.height);
       });
     }
+    if (graph.kind === "global") minY = Math.min(minY, graph.routeTop);
+    if ((graph.kind === "global" || graph.kind === "pipeline-overview") && Number.isFinite(graph.routeLeft)) {
+      minX = Math.min(minX, graph.routeLeft);
+      maxX = Math.max(maxX, graph.routeRight);
+    }
     var rect = canvas.getBoundingClientRect();
     var w = rect.width || 900, h = rect.height || 700;
     var scale = Math.min((w - 2 * MARGIN) / Math.max(1, maxX - minX), (h - 2 * MARGIN) / Math.max(1, maxY - minY), 1);
-    view.scale = Math.max(scale, 0.18);
+    var globalScale = graph.kind === "global" || graph.kind === "pipeline-overview";
+    view.scale = Math.max(scale, globalScale ? 0.04 : 0.18);
     view.x = (w - (maxX + minX) * view.scale) / 2;
     var contentH = (maxY - minY) * view.scale;
     view.y = contentH < h - 2 * MARGIN ? (h - (maxY + minY) * view.scale) / 2 : MARGIN - minY * view.scale;
-    syncViewportTarget();
-  }
-
-  function syncViewportTarget() {
-    viewportTarget.x = view.x;
-    viewportTarget.y = view.y;
-    viewportTarget.scale = view.scale;
   }
 
   function bindPanZoom() {
     var draggingPointer = null, last = null, moved = false;
     canvas.addEventListener("pointerdown", function (event) {
       if (event.button !== 0 || event.target.closest(".node, [role=button]")) return;
-      stopGraphMotion(true);
       draggingPointer = event.pointerId;
       moved = false;
       last = { x: event.clientX, y: event.clientY };
@@ -3851,9 +4319,8 @@
       moved = true;
       view.x += event.clientX - last.x;
       view.y += event.clientY - last.y;
-      syncViewportTarget();
       last = { x: event.clientX, y: event.clientY };
-      scheduleGraphTransform();
+      applyGraphTransform();
     });
     function endDrag(event) {
       if (event.pointerId === draggingPointer) draggingPointer = null;
@@ -3875,7 +4342,6 @@
       var px = e.clientX - rect.left, py = e.clientY - rect.top;
       var factor = Math.max(0.88, Math.min(1.14, Math.exp(-e.deltaY * 0.0015)));
       zoomAt(px, py, factor);
-      scheduleGraphTransform();
     }, { passive: false });
   }
 
@@ -3904,33 +4370,17 @@
     });
   }
 
-  function bindGraphResize() {
-    var lastWidth = -1, lastHeight = -1;
-    var observer = new ResizeObserver(function (entries) {
-      var bounds = entries[0].contentRect;
-      if (bounds.width === lastWidth && bounds.height === lastHeight) return;
-      lastWidth = bounds.width;
-      lastHeight = bounds.height;
-      if (state.workspace !== "graph" || graphResizeFrame !== null) return;
-      graphResizeFrame = requestAnimationFrame(function () {
-        graphResizeFrame = null;
-        if (state.workspace === "graph") redraw(true);
-      });
-    });
-    observer.observe(canvas);
-  }
-
   function zoomBy(factor) {
     var rect = canvas.getBoundingClientRect();
     zoomAt((rect.width || 900) / 2, (rect.height || 700) / 2, factor);
-    scheduleGraphTransform();
   }
 
   function zoomAt(px, py, factor) {
-    var next = Math.min(2.5, Math.max(0.12, viewportTarget.scale * factor));
-    viewportTarget.x = px - (px - viewportTarget.x) * (next / viewportTarget.scale);
-    viewportTarget.y = py - (py - viewportTarget.y) * (next / viewportTarget.scale);
-    viewportTarget.scale = next;
+    var next = Math.min(2.5, Math.max(0.04, view.scale * factor));
+    view.x = px - (px - view.x) * (next / view.scale);
+    view.y = py - (py - view.y) * (next / view.scale);
+    view.scale = next;
+    applyGraphTransform();
   }
 
   function zoomLabel() { return Math.round(view.scale * 100) + "%"; }
@@ -3939,38 +4389,16 @@
     if (readout) readout.textContent = zoomLabel();
   }
 
-  function scheduleGraphTransform() {
-    if (graphTransformFrame !== null) return;
-    function step() {
-      var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      var alpha = reducedMotion ? 1 : 0.24;
-      view.x += (viewportTarget.x - view.x) * alpha;
-      view.y += (viewportTarget.y - view.y) * alpha;
-      view.scale += (viewportTarget.scale - view.scale) * alpha;
-      if (graphRoot) {
-        graphRoot.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
-      }
-      syncZoomReadout();
-      var moving = Math.abs(view.x - viewportTarget.x) > 0.05 ||
-        Math.abs(view.y - viewportTarget.y) > 0.05 ||
-        Math.abs(view.scale - viewportTarget.scale) > 0.0002;
-      if (moving) {
-        graphTransformFrame = requestAnimationFrame(step);
-      } else {
-        view.x = viewportTarget.x;
-        view.y = viewportTarget.y;
-        view.scale = viewportTarget.scale;
-        if (graphRoot) graphRoot.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
-        graphTransformFrame = null;
-      }
+  function applyGraphTransform() {
+    if (graphRoot) {
+      graphRoot.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.scale + ")");
     }
-    graphTransformFrame = requestAnimationFrame(step);
+    syncZoomReadout();
   }
 
   function redraw(refit) {
     var graph = currentGraph();
     layout(graph);
-    relaxGraphLayout(graph, false);
     if (refit) fitView(graph);
     draw(graph);
     lastTopologyKey = graphTopologyKey(graph);
@@ -4033,10 +4461,6 @@
       (n.children || []).forEach(walk);
     })(node);
     return ids;
-  }
-  function disabledCountButton() {
-    var count = Object.keys(state.disabled).length;
-    return count ? '<button id="reactivateAll" class="tool">' + count + " inactive · activate all</button>" : "";
   }
   function fieldAccessCounts(object) {
     var counts = {};
@@ -4135,10 +4559,9 @@
   function text(x, y, cls, t) { var e = el("text"); e.setAttribute("x", x); e.setAttribute("y", y); e.setAttribute("class", cls); e.textContent = t; return e; }
   function defs() {
     var d = el("defs");
-    d.appendChild(marker("arrow", "var(--edge)"));
-    d.appendChild(marker("arrow-trace", "var(--trace)"));
-    d.appendChild(marker("arrow-red", "var(--red)"));
-    for (var i = 0; i < 8; i += 1) d.appendChild(marker("arrow-hue-" + i, "var(--file-hue-" + i + ")"));
+    ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"].forEach(function (color, index) {
+      d.appendChild(marker("arrow-path-" + index, color));
+    });
     return d;
   }
   function marker(id, color) {

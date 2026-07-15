@@ -312,8 +312,6 @@ rect.graph-prompt-selected { fill: var(--teal-fill); stroke: var(--teal) !import
 .edge.graph-prompt-edge:focus-visible { outline: none; stroke: var(--teal); stroke-width: 3px; }
 .clone-edge { fill: none; stroke: var(--clone); stroke-width: 1.6; stroke-dasharray: 2 3; }
 .edge.extends-edge { stroke-dasharray: 8 4; }
-.state-edge { stroke: var(--teal); stroke-dasharray: 6 4; stroke-width: 1.5; }
-.state-edge-label { fill: var(--teal-ink); font-size: 10px; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
 .file-edge { opacity: 0.4; }
 .file-edge.lit { opacity: 1; stroke-width: 2.2; }
 .file-edge.dim, .file-edge.muted { opacity: 0.07; }
@@ -901,21 +899,12 @@ rect.selected-ring { stroke: var(--ink) !important; stroke-width: 2.5px !importa
   .head-status { display: none; }
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .trace-edge { animation: trace-flow 900ms linear infinite; }
-}
-
-@keyframes trace-flow {
-  to { stroke-dashoffset: -26; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .trace-edge { animation: none; }
   body::after { display: none; }
 }
 
 /* GITHUB DARK SYSTEM MAP ---------------------------------------------------
-   One canonical palette for navigation, graph semantics, and source code. */
+   GitHub dark chrome and nodes; the five tab10 path colours are below. */
 :root,
 [data-theme="dark"] {
   --bg: #0d1117;
@@ -924,7 +913,7 @@ rect.selected-ring { stroke: var(--ink) !important; stroke-width: 2.5px !importa
   --ink: #e6edf3;
   --muted: #8b949e;
   --line: #30363d;
-  --edge: #58a6ff;
+  --edge: #1f77b4;
   --grid: rgba(110, 118, 129, 0.12);
   --blue: #58a6ff;
   --blue-fill: rgba(56, 139, 253, 0.15);
@@ -939,25 +928,25 @@ rect.selected-ring { stroke: var(--ink) !important; stroke-width: 2.5px !importa
   --clone: #a371f7;
   --clone-fill: rgba(163, 113, 247, 0.15);
   --clone-ink: #d2a8ff;
-  --trace: #3fb950;
-  --trace-dim: rgba(46, 160, 67, 0.15);
+  --trace: #e6edf3;
+  --trace-dim: rgba(230, 237, 243, 0.12);
   --attention: #d29922;
   --sponsor: #db61a2;
-  --file-hue-0: #58a6ff;
-  --file-hue-1: #3fb950;
-  --file-hue-2: #d29922;
-  --file-hue-3: #a371f7;
-  --file-hue-4: #db61a2;
-  --file-hue-5: #f0883e;
-  --file-hue-6: #79c0ff;
-  --file-hue-7: #8b949e;
+  --file-hue-0: #6e7681;
+  --file-hue-1: #6e7681;
+  --file-hue-2: #6e7681;
+  --file-hue-3: #6e7681;
+  --file-hue-4: #6e7681;
+  --file-hue-5: #6e7681;
+  --file-hue-6: #6e7681;
+  --file-hue-7: #6e7681;
 }
 
 body::after { opacity: 0.08; }
 
 .shell { --detail-width: clamp(24rem, 42vw, 42rem); }
-.shell.source-open { grid-template-columns: 17rem minmax(20rem, 1fr) 5px var(--detail-width); }
-.shell.rail-collapsed.source-open { grid-template-columns: 3.75rem minmax(20rem, 1fr) 5px var(--detail-width); }
+.shell.source-open { grid-template-columns: 17rem minmax(0, 1fr); }
+.shell.rail-collapsed.source-open { grid-template-columns: 3.75rem minmax(0, 1fr); }
 .shell.detail-resizing { cursor: col-resize; user-select: none; }
 
 .detail-resize {
@@ -965,8 +954,11 @@ body::after { opacity: 0.08; }
   border-left: 1px solid #30363d;
   border-right: 1px solid #30363d;
   cursor: col-resize;
-  min-width: 5px;
-  position: relative;
+  bottom: 0;
+  position: fixed;
+  right: var(--detail-width);
+  top: 0;
+  width: 5px;
   touch-action: none;
   z-index: 5;
 }
@@ -982,11 +974,15 @@ body::after { opacity: 0.08; }
 .detail-panel {
   background: #0d1117;
   border-left: 0;
+  bottom: 0;
   min-width: 0;
   overflow: hidden;
   padding: 0;
-  position: relative;
-  width: auto;
+  position: fixed;
+  right: 0;
+  top: 0;
+  width: var(--detail-width);
+  z-index: 6;
 }
 .detail-panel > :not(.detail-head) { margin-left: 0; margin-right: 0; }
 .detail-close {
@@ -1056,43 +1052,72 @@ body::after { opacity: 0.08; }
 
 .node.muted { opacity: 1; }
 .edge {
-  filter: drop-shadow(0 0 2px rgba(56, 139, 253, 0.28));
-  opacity: 0.72;
-  stroke: #58a6ff;
-  stroke-width: 1.5;
+  fill: none;
+  opacity: 1;
+  shape-rendering: geometricPrecision;
+  stroke: var(--path-color, #1f77b4);
+  stroke-linecap: square;
+  stroke-linejoin: round;
+  stroke-width: 3;
 }
+.path-0 { --path-color: #1f77b4; }
+.path-1 { --path-color: #ff7f0e; }
+.path-2 { --path-color: #2ca02c; }
+.path-3 { --path-color: #d62728; }
+.path-4 { --path-color: #9467bd; }
 .edge.muted,
 .file-edge.dim,
-.file-edge.muted { opacity: 0.36; }
-.edge.mutual { filter: drop-shadow(0 0 2px rgba(248, 81, 73, 0.35)); stroke: #f85149; }
-.state-edge { filter: drop-shadow(0 0 2px rgba(210, 153, 34, 0.34)); stroke: #d29922; }
-.clone-edge { filter: drop-shadow(0 0 2px rgba(163, 113, 247, 0.34)); stroke: #a371f7; }
-.trace-context-edge { opacity: 0.32; stroke: #58a6ff !important; stroke-dasharray: 2 7; }
+.file-edge.muted { opacity: 1; }
+.edge.mutual { stroke: var(--path-color, #1f77b4); }
+.clone-edge,
+.extends-edge { stroke: #6e7681; stroke-width: 1; }
+.clone-edge { stroke-dasharray: 7 5; }
+.trace-context-edge { opacity: 1; }
 .trace-edge {
-  filter: drop-shadow(0 0 4px rgba(63, 185, 80, 0.48));
   opacity: 1;
-  stroke: #3fb950 !important;
-  stroke-width: 2.7 !important;
+  stroke: var(--path-color, #1f77b4) !important;
+  stroke-dasharray: none;
+  stroke-width: 5 !important;
 }
+.file-selection-edge { opacity: 1; stroke: var(--path-color, #1f77b4) !important; stroke-width: 5 !important; }
 .trace-node rect,
 .trace-node.is-root rect,
 .trace-node.is-live rect,
 .trace-node.is-crucial rect,
 .trace-node.is-dead rect {
   fill: #0d1117;
-  filter: drop-shadow(0 0 4px rgba(63, 185, 80, 0.3));
-  stroke: #3fb950;
+  stroke: #e6edf3;
 }
-rect.selected-ring { stroke: #58a6ff !important; }
+rect.selected-ring { stroke: #e6edf3 !important; stroke-width: 3px !important; }
 .trace-start rect,
-.trace-end rect { stroke: #3fb950 !important; }
+.trace-end rect { stroke: #e6edf3 !important; }
+
+.file-accent { stroke: #6e7681 !important; stroke-width: 2; }
+.global-file.example-file .file-rect {
+  stroke: #8b949e;
+  stroke-dasharray: 7 4;
+  stroke-width: 2;
+}
+.global-file.orchestrator-file .file-rect {
+  stroke: #e6edf3;
+  stroke-dasharray: none;
+  stroke-width: 4;
+}
+.global-file.example-file .node-name,
+.global-file.orchestrator-file .node-name { font-weight: 800; }
+.global-file.example-file .node-meta,
+.global-file.orchestrator-file .node-meta { fill: #e6edf3; }
+.global-file.trace-file .file-rect,
+.global-file.selected-file .file-rect { stroke: #e6edf3; stroke-width: 5; }
+.file-fn.trace-function { fill: #e6edf3; font-weight: 700; }
+.file-fn.selected { fill: #e6edf3; text-decoration: underline; }
 
 .object-compartment-box {
   fill: rgba(56, 139, 253, 0.035);
   stroke: #30363d;
   stroke-width: 1;
 }
-.object-compartment-box.selected { stroke: #58a6ff; stroke-width: 2; }
+.object-compartment-box.selected { stroke: #e6edf3; stroke-width: 3; }
 .object-compartment-title {
   cursor: pointer;
   fill: #79c0ff;
@@ -1113,7 +1138,7 @@ rect.selected-ring { stroke: #58a6ff !important; }
   font-weight: 700;
   letter-spacing: 0.11em;
 }
-.node.method-constructor:not(.trace-node) rect { stroke: #d29922; }
+.node.method-constructor:not(.trace-node) rect { stroke: #e6edf3; }
 
 .sidebar-tab.active,
 .navigation-mode.active,
@@ -1121,9 +1146,48 @@ rect.selected-ring { stroke: #58a6ff !important; }
   background: rgba(56, 139, 253, 0.15);
   color: #79c0ff;
 }
-.trow.active { background: rgba(46, 160, 67, 0.15); border-left-color: #3fb950; }
+.trow.active { background: rgba(230, 237, 243, 0.12); border-left-color: #e6edf3; }
 .tool-primary,
 .mode-button.active { background: rgba(56, 139, 253, 0.15); color: #79c0ff; }
+.mode-button:disabled { color: #6e7681; cursor: default; }
+.global-view-toggle { border-color: #484f58; }
+
+.pipeline-compartment-box {
+  fill: rgba(110, 118, 129, 0.035);
+  stroke: #30363d;
+  stroke-dasharray: 8 5;
+  stroke-width: 1.5;
+}
+.pipeline-compartment-title {
+  fill: #e6edf3;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+.pipeline-compartment-count {
+  fill: #8b949e;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+.pipeline-outside-title { fill: #8b949e; }
+
+.tools { margin-left: auto; }
+.edge-legend { align-items: center; display: inline-flex; gap: 10px; }
+.edge-legend span { color: #8b949e; font-size: 9px; white-space: nowrap; }
+.edge-legend span::before {
+  content: "";
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: 2px;
+  width: 18px;
+  border-top: 3px solid;
+}
+.edge-legend .legend-path-0::before { border-color: #1f77b4; }
+.edge-legend .legend-path-1::before { border-color: #ff7f0e; }
+.edge-legend .legend-path-2::before { border-color: #2ca02c; }
+.edge-legend .legend-path-3::before { border-color: #d62728; }
+.edge-legend .legend-path-4::before { border-color: #9467bd; }
 
 .city-map-dir-body { fill: #161b22; stroke: #30363d; }
 .city-map-dir-header { fill: rgba(56, 139, 253, 0.22); stroke: #58a6ff; }
@@ -1136,15 +1200,14 @@ rect.selected-ring { stroke: #58a6ff !important; }
 .city-map-file.tone-amber rect { fill: rgba(210, 153, 34, 0.28); stroke: #d29922; }
 .city-map-file.tone-red rect { fill: rgba(248, 81, 73, 0.28); stroke: #f85149; }
 
-@media (prefers-reduced-motion: no-preference) {
-  .trace-edge { animation: trace-flow 980ms linear infinite; }
+*,
+*::before,
+*::after {
+  animation: none !important;
+  scroll-behavior: auto !important;
+  transition: none !important;
 }
-
-@keyframes trace-flow {
-  0% { opacity: 0.72; stroke-dashoffset: 0; }
-  48% { opacity: 1; }
-  100% { opacity: 0.72; stroke-dashoffset: -26; }
-}
+button:active:not(:disabled) { transform: none; }
 
 @media (max-width: 1120px) {
   .shell.source-open { grid-template-columns: 17rem minmax(0, 1fr); }
