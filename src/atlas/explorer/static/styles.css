@@ -904,7 +904,7 @@ rect.selected-ring { stroke: var(--ink) !important; stroke-width: 2.5px !importa
 }
 
 /* GITHUB DARK SYSTEM MAP ---------------------------------------------------
-   GitHub dark chrome and nodes; the five tab10 path colours are below. */
+   GitHub dark chrome and nodes; the expanded Tableau path palette is below. */
 :root,
 [data-theme="dark"] {
   --bg: #0d1117;
@@ -1065,6 +1065,21 @@ body::after { opacity: 0.08; }
 .path-2 { --path-color: #2ca02c; }
 .path-3 { --path-color: #d62728; }
 .path-4 { --path-color: #9467bd; }
+.path-5 { --path-color: #8c564b; }
+.path-6 { --path-color: #e377c2; }
+.path-7 { --path-color: #7f7f7f; }
+.path-8 { --path-color: #bcbd22; }
+.path-9 { --path-color: #17becf; }
+.path-10 { --path-color: #aec7e8; }
+.path-11 { --path-color: #ffbb78; }
+.path-12 { --path-color: #98df8a; }
+.path-13 { --path-color: #ff9896; }
+.path-14 { --path-color: #c5b0d5; }
+.path-15 { --path-color: #c49c94; }
+.path-16 { --path-color: #f7b6d2; }
+.path-17 { --path-color: #c7c7c7; }
+.path-18 { --path-color: #dbdb8d; }
+.path-19 { --path-color: #9edae5; }
 .edge.muted,
 .file-edge.dim,
 .file-edge.muted { opacity: 1; }
@@ -1154,12 +1169,12 @@ rect.selected-ring { stroke: #e6edf3 !important; stroke-width: 3px !important; }
 
 .pipeline-compartment-box {
   fill: rgba(110, 118, 129, 0.035);
-  stroke: #30363d;
+  stroke: var(--path-color, #30363d);
   stroke-dasharray: 8 5;
   stroke-width: 1.5;
 }
 .pipeline-compartment-title {
-  fill: #e6edf3;
+  fill: var(--path-color, #e6edf3);
   font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.08em;
@@ -1171,23 +1186,14 @@ rect.selected-ring { stroke: #e6edf3 !important; stroke-width: 3px !important; }
   letter-spacing: 0.08em;
 }
 .pipeline-outside-title { fill: #8b949e; }
+.node.pipeline-head rect { stroke: var(--path-color); stroke-width: 3; }
+.node.pipeline-head .node-meta { fill: var(--path-color); font-weight: 700; }
 
 .tools { margin-left: auto; }
-.edge-legend { align-items: center; display: inline-flex; gap: 10px; }
-.edge-legend span { color: #8b949e; font-size: 9px; white-space: nowrap; }
-.edge-legend span::before {
-  content: "";
-  display: inline-block;
-  margin-right: 4px;
-  vertical-align: 2px;
-  width: 18px;
-  border-top: 3px solid;
-}
-.edge-legend .legend-path-0::before { border-color: #1f77b4; }
-.edge-legend .legend-path-1::before { border-color: #ff7f0e; }
-.edge-legend .legend-path-2::before { border-color: #2ca02c; }
-.edge-legend .legend-path-3::before { border-color: #d62728; }
-.edge-legend .legend-path-4::before { border-color: #9467bd; }
+.edge-legend { align-items: center; display: inline-flex; gap: 4px; }
+.edge-legend-label { color: #8b949e; font-size: 9px; white-space: nowrap; }
+.edge-legend-swatches { display: grid; gap: 1px; grid-template-columns: repeat(10, 3px); }
+.edge-legend-swatch { background: var(--path-color); display: block; height: 5px; width: 3px; }
 
 .city-map-dir-body { fill: #161b22; stroke: #30363d; }
 .city-map-dir-header { fill: rgba(56, 139, 253, 0.22); stroke: #58a6ff; }
