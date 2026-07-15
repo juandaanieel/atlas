@@ -1175,7 +1175,7 @@ button:active:not(:disabled) { transform: none; }
   flex: 0 0 auto;
 }
 
-.file-toggle {
+.graph-toggle {
   background: #0d1117;
   border: 1px solid #30363d;
   color: #8b949e;
@@ -1190,25 +1190,32 @@ button:active:not(:disabled) { transform: none; }
   text-align: center;
 }
 
-.file-toggle.on {
+.graph-toggle.on {
   background: rgba(63, 185, 80, 0.08);
   border-color: #3fb950;
   color: #3fb950;
 }
 
-.file-toggle.off:hover {
+.graph-toggle.mixed {
+  background: rgba(210, 153, 34, 0.08);
+  border-color: #d29922;
+  color: #d29922;
+}
+
+.graph-toggle.off:hover {
   border-color: #8b949e;
   color: #c9d1d9;
 }
 
-.file-toggle:disabled {
+.graph-toggle:disabled {
   border-color: #21262d;
   color: #484f58;
   cursor: default;
 }
 
-.trow.file-off .tname { color: #6e7681; }
-.trow.file-off .tbadges { opacity: 0.45; }
+.trow.graph-off .tname { color: #6e7681; }
+.trow.graph-off .tbadges { opacity: 0.45; }
+.trow.graph-mixed .tname { color: #8b949e; }
 
 .sidebar {
   border: 1px solid #30363d;

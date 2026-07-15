@@ -111,9 +111,20 @@
   });
 
   var treeByPath = {};
+  var functionIdsByTreePath = {};
   (function indexTree(node) {
     treeByPath[node.path] = node;
     node.children.forEach(indexTree);
+    var functionIds = (node.function_ids || []).slice();
+    node.children.forEach(function (child) {
+      functionIds = functionIds.concat(functionIdsByTreePath[child.path]);
+    });
+    var seenFunctionIds = {};
+    functionIdsByTreePath[node.path] = functionIds.filter(function (id) {
+      if (seenFunctionIds[id]) return false;
+      seenFunctionIds[id] = true;
+      return true;
+    });
   })(tree);
 
   var state = {
@@ -3965,12 +3976,12 @@
     treePanel.querySelectorAll("[data-scope]").forEach(function (row) {
       row.addEventListener("click", function () { setScope(row.getAttribute("data-scope")); });
     });
-    treePanel.querySelectorAll("[data-toggle-file]").forEach(function (button) {
+    treePanel.querySelectorAll("[data-toggle-graph-node]").forEach(function (button) {
       button.addEventListener("click", function (event) {
         event.stopPropagation();
-        var path = button.getAttribute("data-toggle-file");
-        toggleFile(path);
-        focusTreeItem("data-toggle-file", path);
+        var path = button.getAttribute("data-toggle-graph-node");
+        toggleGraphNode(path);
+        focusTreeItem("data-toggle-graph-node", path);
       });
     });
     syncTreeSelection();
@@ -3989,18 +4000,18 @@
   function treeRows(node, depth) {
     var open = state.expanded[node.path];
     var hasChildren = node.children.length;
-    var fileOff = node.type === "module" && !fileIsEnabled(node);
+    var graphState = graphNodeState(node);
     var twirl = hasChildren
       ? '<button type="button" class="twirl" aria-expanded="' + !!open + '" aria-label="' +
         (open ? "Collapse " : "Expand ") + escapeAttr(node.path || "all") + '" data-twirl="' + escapeAttr(node.path) + '">' + (open ? "▾" : "▸") + "</button>"
       : '<span class="twirl empty"></span>';
     var html =
-      '<div class="trow' + (fileOff ? " file-off" : "") + '" role="listitem" aria-level="' + (depth + 1) + '" data-path="' + escapeAttr(node.path) + '" style="--d:' + depth + '">' +
+      '<div class="trow' + (graphState === "off" ? " graph-off" : graphState === "mixed" ? " graph-mixed" : "") + '" role="listitem" aria-level="' + (depth + 1) + '" data-path="' + escapeAttr(node.path) + '" style="--d:' + depth + '">' +
         twirl +
         '<button type="button" class="trow-action" aria-label="Open ' + escapeAttr(node.path || "all") + '" data-scope="' + escapeAttr(node.path) + '">' +
           '<span class="tname">' + escape(node.path === "" ? "all" : node.name) + (node.type === "package" ? "/" : "") + "</span>" +
           treeBadges(node.rollup) +
-        "</button>" + fileToggle(node) +
+        "</button>" + graphNodeToggle(node, graphState) +
       "</div>";
     if (open) {
       node.children.forEach(function (child) { html += treeRows(child, depth + 1); });
@@ -4008,20 +4019,27 @@
     return html;
   }
 
-  function fileToggle(node) {
-    if (node.type !== "module") return "";
-    var hasFunctions = node.function_ids.length > 0;
-    var enabled = fileIsEnabled(node);
-    var action = enabled ? "Remove from graph" : "Add to graph";
-    var label = enabled ? "ON" : "OFF";
-    return '<button type="button" class="file-toggle ' + (enabled ? "on" : "off") +
-      '" data-toggle-file="' + escapeAttr(node.path) + '" aria-pressed="' + enabled + '" aria-label="' +
-      escapeAttr(hasFunctions ? action + " " + node.path : "No analyzed functions in " + node.path) + '" title="' +
+  function graphNodeToggle(node, graphState) {
+    if (!node.path) return "";
+    var functionIds = functionIdsByTreePath[node.path];
+    var hasFunctions = functionIds.length > 0;
+    var nodeKind = node.type === "module" ? "file" : "folder";
+    var action = graphState === "off" ? "Add " + nodeKind + " to graph" : "Remove " + nodeKind + " from graph";
+    var label = graphState === "mixed" ? "MIX" : graphState === "on" ? "ON" : "OFF";
+    var pressed = graphState === "mixed" ? "mixed" : String(graphState === "on");
+    var nodeLabel = node.path || "all";
+    return '<button type="button" class="graph-toggle ' + graphState +
+      '" data-toggle-graph-node="' + escapeAttr(node.path) + '" aria-pressed="' + pressed + '" aria-label="' +
+      escapeAttr(hasFunctions ? action + " " + nodeLabel : "No analyzed functions in " + nodeLabel) + '" title="' +
       escapeAttr(hasFunctions ? action : "No analyzed functions") + '"' + (hasFunctions ? "" : " disabled") + ">" + label + "</button>";
   }
 
-  function fileIsEnabled(node) {
-    return node.function_ids.some(function (id) { return !state.disabled[id]; });
+  function graphNodeState(node) {
+    var functionIds = functionIdsByTreePath[node.path];
+    if (!functionIds.length) return "empty";
+    var activeCount = functionIds.filter(function (id) { return !state.disabled[id]; }).length;
+    if (!activeCount) return "off";
+    return activeCount === functionIds.length ? "on" : "mixed";
   }
 
   function treeBadges(rollup) {
@@ -4154,34 +4172,46 @@
     state.traceEnd = null;
   }
 
-  function toggleFile(path) {
-    var fileNode = treeByPath[path];
-    if (!fileNode || fileNode.type !== "module" || !fileNode.function_ids.length) return;
+  function toggleGraphNode(path) {
+    var graphNode = treeByPath[path];
+    if (!graphNode) return;
+    var functionIds = functionIdsByTreePath[path];
+    if (!functionIds.length) return;
     clearGraphPromptState();
-    var enable = !fileIsEnabled(fileNode);
-    var fileFunctions = setOf(fileNode.function_ids);
-    fileNode.function_ids.forEach(function (id) {
+    var enable = graphNodeState(graphNode) === "off";
+    var graphFunctions = setOf(functionIds);
+    functionIds.forEach(function (id) {
       if (enable) delete state.disabled[id];
       else state.disabled[id] = true;
     });
-    if (!enable && (fileFunctions[state.traceStart] || fileFunctions[state.traceEnd])) clearTraceState();
+    if (!enable && (graphFunctions[state.traceStart] || graphFunctions[state.traceEnd])) clearTraceState();
+    var selectedObject = state.graphSelectionType === "object" && objectById[state.graphSelection];
     if (!enable && (
-      (state.graphSelectionType === "file" && state.graphSelection === path) ||
-      fileFunctions[state.graphSelection]
+      (state.graphSelectionType === "file" && pathIsWithin(state.graphSelection, graphNode.path)) ||
+      graphFunctions[state.graphSelection] ||
+      (selectedObject && pathIsWithin(selectedObject.module, graphNode.path))
     )) {
       state.graphSelection = null;
       state.graphSelectionType = null;
     }
-    if (!enable && state.detailSelection && state.detailSelection.type === "function" &&
-        fileFunctions[state.detailSelection.id]) {
+    var selectedDetailObject = state.detailSelection && state.detailSelection.type === "object" &&
+      objectById[state.detailSelection.id];
+    if (!enable && state.detailSelection && (
+      (state.detailSelection.type === "function" && graphFunctions[state.detailSelection.id]) ||
+      (selectedDetailObject && pathIsWithin(selectedDetailObject.module, graphNode.path))
+    )) {
       state.detailSelection = null;
       state.sourceRange = null;
       detailReturnFocus = null;
     }
-    if (!enable && fileFunctions[state.hovered]) state.hovered = null;
-    if (!enable && fileFunctions[state.focus]) state.focus = null;
-    if (!enable && state.lastFunctionClick && fileFunctions[state.lastFunctionClick.id]) state.lastFunctionClick = null;
+    if (!enable && graphFunctions[state.hovered]) state.hovered = null;
+    if (!enable && graphFunctions[state.focus]) state.focus = null;
+    if (!enable && state.lastFunctionClick && graphFunctions[state.lastFunctionClick.id]) state.lastFunctionClick = null;
     rerender();
+  }
+
+  function pathIsWithin(path, parentPath) {
+    return !parentPath || path === parentPath || path.indexOf(parentPath + ".") === 0;
   }
 
   function expandTo(path) {
