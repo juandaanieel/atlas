@@ -5,8 +5,11 @@
 ## Goal
 
 Replace the current vanilla JavaScript and SVG explorer with a TypeScript
-application that supports interactive graph physics without losing
-architectural clarity or the existing source-review workflow.
+application built around direct, physics-driven graph exploration without
+losing architectural clarity or the existing source-review workflow. Users
+must be able to grab nodes and containers, feel the connected neighborhood
+respond, pin important structure, tune the forces, and let the graph settle
+into a readable state.
 
 The new explorer must make three activities work together:
 
@@ -88,11 +91,18 @@ rendering bottleneck that semantic zoom and aggregation do not solve.
 A single force simulation cannot express every Atlas constraint. The explorer
 therefore provides three layout modes:
 
-- **Field:** force-directed exploration with free node movement.
+- **Field:** Obsidian-inspired force-directed exploration with free node
+  movement and user-tunable forces.
 - **Architecture:** deterministic directional layout using
   [ELK Layered](https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html).
 - **Hybrid:** architectural placement for major regions followed by constrained
   local physics. This is the default.
+
+Physics is a functional requirement, not decorative animation. Field and
+Hybrid must use a real force simulation throughout direct manipulation. When a
+user drags a node, its linked neighborhood and containing region respond. When
+the user releases it, the simulation settles from the new position. The graph
+must never drift or reheat because of selection, hover, or panel changes.
 
 The hybrid layout uses:
 
@@ -107,6 +117,29 @@ The hybrid layout uses:
 Run iterative layouts in a Web Worker. The simulation cools and stops after it
 settles. Selection never restarts physics. Dragging, filtering, SOLO, layout
 changes, and an explicit `Relax` action may reheat it.
+
+### Borrow Obsidian's graph interaction model
+
+[Obsidian Graph view](https://obsidian.md/help/plugins/graph) is the interaction
+reference, not a visual template. Carry these ideas into Atlas:
+
+- A global graph and a local graph centered on the current selection. Local
+  scope has a depth control for one to several call hops.
+- Immediate connection highlighting on hover and durable execution-path
+  highlighting on click.
+- Direct canvas pan and zoom, direct node dragging, and a context menu on graph
+  elements.
+- A collapsible force panel with center gravity, repulsion, link attraction,
+  link distance, collision padding, motion damping, and `Restore defaults`.
+- Search-backed filters, orphan visibility, and saved groups. Atlas maps groups
+  to reusable scopes and filter presets; color remains reserved for execution
+  paths.
+- Display controls for labels, arrows, node scale, and link thickness.
+
+Atlas adds stronger structure than Obsidian: file and class containers,
+directional calls, public-method ports, private-method containment, execution
+paths, and semantic zoom. Force controls operate within those constraints
+rather than flattening the codebase into an undifferentiated cloud.
 
 ### Model structure and execution separately
 
@@ -287,8 +320,17 @@ code.
   container dragging, visibility changes, SOLO, or `Relax`.
 - Selection, hover, opening source, closing source, and creating a comment do
   not move the graph.
-- Dragging a node temporarily pins it and reheats its local neighborhood.
+- Dragging a node or container gives direct positional control and reheats only
+  the affected neighborhood. Connected nodes visibly respond during the drag.
+- Releasing a dragged element lets that neighborhood find a new equilibrium;
+  the rest of the graph remains stable.
 - The user may pin a node permanently until the layout is reset.
+- Pinned nodes and containers are visually identifiable and remain fixed across
+  selection, filtering, source-panel changes, and saved sessions.
+- `Pause` freezes the current simulation immediately. `Relax` reheats the
+  active scope. `Reset layout` clears pins and restores the mode defaults.
+- Force controls update the active simulation immediately and are stored per
+  layout mode. `Restore defaults` returns to Atlas-tuned values.
 - File and folder visibility changes reorganize the remaining visible graph.
 - SOLO shows one file or folder subtree and reorganizes the remaining graph.
 
@@ -302,6 +344,9 @@ code.
 - Closing the source panel does not clear graph selection.
 - A selected function inside a selected path receives a second, neutral
   selection treatment without changing path color.
+- Local graph scope can replace the global canvas around the selected node at
+  a configurable call depth. Returning to global scope preserves selection and
+  pinned positions.
 
 ### Semantic zoom
 
@@ -348,22 +393,27 @@ differently.
 Exit criterion: `atlas explore` opens the new shell and loads the snapshot;
 static export remains available.
 
-### 3. Implement a graph vertical slice
+### 3. Implement a physics-driven graph vertical slice
 
 - Render functions and direct calls with custom G6 Canvas nodes and edges.
 - Add pan, zoom, fit, selection, empty-canvas clear, and double-click events.
+- Add Field mode with drag, local reheating, settle, pin, pause, `Relax`, reset,
+  and the initial force controls.
 - Reproduce stable path colors and selected-path dimming.
 - Keep graph selection independent from panel state.
 
 Exit criterion: one representative repository supports function selection,
-path highlighting, and source-open events without React receiving layout
-ticks.
+path highlighting, source-open events, and direct physics-driven manipulation
+without React receiving layout ticks. Dragging changes the local equilibrium;
+selection does not.
 
-### 4. Add hybrid layout and visibility controls
+### 4. Add hybrid architecture and visibility controls
 
 - Add the layout worker.
-- Implement Field, Architecture, and Hybrid modes.
-- Add settle, reheat, local drag, pin, and `Relax` behavior.
+- Add Architecture and Hybrid modes to the Field mode from phase 3.
+- Constrain local physics by file and class regions without removing direct
+  manipulation.
+- Add global and local scopes with a call-depth control.
 - Port file and folder ON/OFF and SOLO controls.
 - Reorganize visible nodes after visibility changes.
 
@@ -443,6 +493,12 @@ no unique supported behavior.
 - Closing source preserves graph selection.
 - ON/OFF and SOLO work for files and folders.
 - Visibility changes reheat and settle the graph.
+- Dragging a node moves it directly, causes only its neighborhood to respond,
+  and reaches a stable resting state after release.
+- Pin, unpin, pause, `Relax`, and reset have distinct, predictable effects.
+- Force controls visibly change center gravity, repulsion, link attraction,
+  link distance, collision padding, and damping; restoring defaults is exact.
+- Local scope expands by call depth and returns to the unchanged global scope.
 - Source comments and graph comments coexist in one review session.
 - AI cancellation, error, retry, and copy-prompt fallback remain usable.
 - Keyboard navigation and focus restoration work across graph, tree, source,
@@ -463,8 +519,16 @@ a measured bottleneck and a repeatable benchmark.
 ## Acceptance criteria
 
 - Atlas retains the Python analyzer and produces a versioned browser contract.
-- The default Hybrid view combines architectural regions with local physics.
+- Field and Hybrid are genuinely physics-driven: grabbed nodes and containers
+  directly follow the pointer, connected neighborhoods respond, collisions are
+  resolved, and the graph settles after release.
+- The default Hybrid view combines architectural regions with local physics;
+  Field provides unconstrained Obsidian-style exploration and Architecture
+  provides a deterministic fallback.
 - Graph movement happens only for explicit layout-affecting actions.
+- Users can tune, pause, relax, reset, pin, and restore the force simulation
+  without losing their graph or review selection.
+- Global and depth-limited local graph scopes are both available.
 - Files, folders, classes, functions, methods, and pipelines remain visually
   distinguishable at every semantic-zoom level.
 - Public class methods are external ports; private methods remain internal.
@@ -489,6 +553,13 @@ a measured bottleneck and a repeatable benchmark.
 Mitigation: keep deterministic Architecture mode, make Hybrid the default,
 anchor public heads, use container gravity, and stop the simulation after it
 settles.
+
+### Physics feels decorative or uncontrollable
+
+Mitigation: ship direct dragging in the first graph slice, expose the small set
+of Obsidian-inspired force controls, reheat only the affected scope, provide
+pin and pause controls, and verify that each control produces an observable and
+repeatable layout change.
 
 ### Compound structure conflicts with pipeline membership
 
