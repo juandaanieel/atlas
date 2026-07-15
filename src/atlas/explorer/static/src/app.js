@@ -24,11 +24,6 @@
   var payload = window.ATLAS_PAYLOAD;
   var model = payload.model;
   var tree = model.tree;
-  var citymap = payload.citymap || { files: [], dirs: [], layout: {} };
-  var cityDirByPath = {};
-  citymap.dirs.forEach(function (directory) { cityDirByPath[directory.path] = directory; });
-  var cityFileByPath = {};
-  citymap.files.forEach(function (file) { cityFileByPath[file.path] = file; });
 
   var nodeById = {};
   model.nodes.forEach(function (n) { nodeById[n.id] = n; });
@@ -95,16 +90,14 @@
   })(tree);
 
   var state = {
-    workspace: "summary",
-    navigationSurface: "city",
-    sidebarTab: "pages",
+    workspace: "graph",
+    sidebarTab: "navigation",
     scope: tree.path,           // path of the package/module currently scoped
-    mode: "functions",
-    globalView: "files",
+    mode: "global",
+    globalView: "pipelines",
     focus: null,                // a function id when in neighborhood mode
     graphSelection: null,
     graphSelectionType: null,
-    mapSelection: null,
     detailSelection: null,
     objectFocus: null,
     sourceRange: null,
@@ -121,10 +114,9 @@
     traceStart: null,
     traceEnd: null,
     hovered: null,
-    cityPath: "",
     disabled: {},
     expanded: { "": true },    // tree paths that are open
-    navigationCollapsed: false,
+    navigationCollapsed: true,
     useCaseSelections: {},
     useCaseLayerSelections: {},
     collapsedUseCases: {},
@@ -135,15 +127,14 @@
   var view = { x: MARGIN, y: MARGIN, scale: 1 };
   var graphRoot = null;
   var lastTopologyKey = null;
+  var lastLaidOutGraph = null;
   var renderedDetailKey = null;
   var detailReturnFocus = null;
   var navigation = { back: [], forward: [] };
 
   var canvas = document.getElementById("canvas");
   var treePanel = document.getElementById("tree");
-  var cityMapRail = document.getElementById("cityMapRail");
   var sidebarTabs = document.getElementById("sidebarTabs");
-  var navigationModes = document.getElementById("navigationModes");
   var viewPanel = document.getElementById("views");
   var tabContent = document.getElementById("tabContent");
   var historyPanel = document.getElementById("history");
@@ -169,25 +160,23 @@
   function readHash() {
     var params = core.parseHash(location.hash);
     if (!Object.keys(params).length) return;
+    var hasLegacyGraphState = core.hasLegacyGraphHashState(params);
+    if (params.mode === undefined && hasLegacyGraphState) state.mode = "functions";
     if (params.scope !== undefined && treeByPath[params.scope]) {
       state.scope = params.scope;
       expandTo(params.scope);
     }
     if (params.mode === "functions" || params.mode === "objects" || params.mode === "global") state.mode = params.mode;
-    if (params.globalView === "pipelines") state.globalView = "pipelines";
+    if (params.globalView === "files" || params.globalView === "pipelines") state.globalView = params.globalView;
+    if (params.mode === "global" && params.globalView === undefined) state.globalView = "files";
     var requestedWorkspace = params.workspace || params.tab;
     var hasExplicitWorkspace = isWorkspace(requestedWorkspace);
     if (hasExplicitWorkspace) {
       state.workspace = requestedWorkspace;
-    } else if (core.hasLegacyGraphHashState(params)) {
+    } else if (hasLegacyGraphState) {
       // Older links predate the workspace field. Their graph-specific state
-      // still needs to open the graph rather than the default Summary page.
+      // still explicitly identifies the graph workspace.
       state.workspace = "graph";
-    }
-    if (params.nav === "tree" || params.nav === "city") state.navigationSurface = params.nav;
-    if (params.city !== undefined && (params.city === "" || cityDirByPath[params.city])) {
-      state.cityPath = params.city;
-      if (state.mode !== "global") synchronizeGraphWithCityPath(params.city);
     }
     var graphId = params.graph || params.sel;
     if (graphId) {
@@ -204,12 +193,6 @@
         state.traceStart = graphId;
         if (!params.source && !params.detail) state.detailSelection = { type: "function", id: graphId };
       }
-    }
-    if (params.map && params.mapType === "file" && cityFileByPath[params.map]) {
-      state.mapSelection = { kind: "file", path: params.map };
-    }
-    if (params.map && params.mapType === "dir" && cityDirByPath[params.map]) {
-      state.mapSelection = { kind: params.mapType, path: params.map };
     }
     if (params.objectFocus && objectById[params.objectFocus]) {
       state.scope = objectById[params.objectFocus].module;
@@ -236,7 +219,7 @@
     }
     if (params.traceEnd && activeTraceFunction(params.traceEnd)) state.traceEnd = params.traceEnd;
     if (state.mode === "global") state.scope = tree.path;
-    if (!params.mode && objectDominated(treeByPath[state.scope] || tree)) state.mode = "objects";
+    if (!params.mode && state.mode !== "global" && objectDominated(treeByPath[state.scope] || tree)) state.mode = "objects";
     state.objectFocus = null;
   }
 
@@ -982,20 +965,58 @@
       for (var u = layers.length - 2; u >= 0; u -= 1) reorder(layers[u], out); // up: follow callees
     }
 
-    var y = 0;
-    layers.forEach(function (layer) {
-      var row = byLayer[layer];
-      var total = row.reduce(function (sum, it) { return sum + it.w; }, 0) + (row.length - 1) * 58;
-      var rowHeight = row.reduce(function (max, it) { return Math.max(max, it.h || NODE_H); }, NODE_H);
-      var x = -total / 2;
-      row.forEach(function (it) {
-        it.cx = x + it.w / 2;
-        it.cy = y + (it.h || NODE_H) / 2;
-        x += it.w + 58;
+    if (graph.kind === "function") {
+      layoutCompactFunctionGrid(layers, byLayer, items);
+    } else {
+      var y = 0;
+      layers.forEach(function (layer) {
+        var row = byLayer[layer];
+        var total = row.reduce(function (sum, it) { return sum + it.w; }, 0) + (row.length - 1) * 58;
+        var rowHeight = row.reduce(function (max, it) { return Math.max(max, it.h || NODE_H); }, NODE_H);
+        var x = -total / 2;
+        row.forEach(function (it) {
+          it.cx = x + it.w / 2;
+          it.cy = y + (it.h || NODE_H) / 2;
+          x += it.w + 58;
+        });
+        y += rowHeight + 92;
       });
-      y += rowHeight + 92;
-    });
+    }
     assignEdgeRoutes(graph);
+  }
+
+  // A stable reading-order grid prevents large files from becoming a single
+  // off-screen row. Topological depth still determines ordering and colour;
+  // the visual rows only use the canvas more efficiently.
+  function layoutCompactFunctionGrid(layers, byLayer, items) {
+    var ordered = [];
+    layers.forEach(function (layer) { ordered = ordered.concat(byLayer[layer]); });
+    var averageWidth = ordered.reduce(function (sum, item) { return sum + item.w; }, 0) / ordered.length;
+    var cellWidth = averageWidth + 34;
+    var cellHeight = NODE_H + 48;
+    var columns = Math.max(1, Math.min(24, Math.round(Math.sqrt(
+      ordered.length * 1.6 * cellHeight / cellWidth
+    ))));
+    var rows = [];
+    for (var start = 0; start < ordered.length; start += columns) {
+      var row = ordered.slice(start, start + columns);
+      if (rows.length % 2) row.reverse();
+      rows.push(row);
+    }
+    var y = 0;
+    rows.forEach(function (row, rowIndex) {
+      var width = row.reduce(function (sum, item) { return sum + item.w; }, 0) + (row.length - 1) * 34;
+      var height = row.reduce(function (maximum, item) { return Math.max(maximum, item.h); }, NODE_H);
+      var x = -width / 2;
+      row.forEach(function (item) {
+        item.semanticLayer = item.layer;
+        item.visualRow = rowIndex;
+        item.cx = x + item.w / 2;
+        item.cy = y + item.h / 2;
+        x += item.w + 34;
+      });
+      y += height + 48;
+    });
   }
 
   function assignEdgeRoutes(graph) {
@@ -1009,8 +1030,8 @@
       minX = Math.min(minX, groupInfo.left);
       maxX = Math.max(maxX, groupInfo.left + groupInfo.width);
     });
-    if (graph.kind === "pipeline-overview") {
-      assignPipelineRoutes(graph, byId, minX, maxX);
+    if (graph.kind === "pipeline-overview" || graph.kind === "function") {
+      assignObstacleRoutes(graph, byId, minX, maxX);
       return;
     }
     var corridors = {}, outer = [];
@@ -1063,10 +1084,10 @@
     assignFunctionEdgePorts(graph.edges);
   }
 
-  // Pipeline edges use the nearest vertical channel that does not cross a
-  // function box. Lanes may be reused when their vertical ranges do not
-  // overlap, keeping the drawing compact without merging independent paths.
-  function assignPipelineRoutes(graph, byId, minX, maxX) {
+  // Compact grids need routes that consider every segment, not only a single
+  // vertical lane. Candidate paths stay deterministic and prefer short,
+  // obstacle-free corridors with minimal overlap between different colours.
+  function assignObstacleRoutes(graph, byId, minX, maxX) {
     var nodeObstacles = graph.items.map(function (item) {
       return {
         id: item.id,
@@ -1076,56 +1097,336 @@
         bottom: item.cy + item.h / 2,
       };
     });
-    var channelIntervals = {};
-    var routeLeft = minX, routeRight = maxX;
-    var gridLeft = Math.floor((minX - 28) / 5) * 5;
-    var gridRight = Math.ceil((maxX + 28) / 5) * 5;
+    var groupObstacles = (graph.groups || []).map(function (groupInfo) {
+      return {
+        id: groupInfo.id,
+        left: groupInfo.left,
+        right: groupInfo.left + groupInfo.width,
+        top: groupInfo.top,
+        bottom: groupInfo.bottom,
+      };
+    });
+    var minY = Math.min.apply(null, nodeObstacles.map(function (obstacle) { return obstacle.top; }));
+    var maxY = Math.max.apply(null, nodeObstacles.map(function (obstacle) { return obstacle.bottom; }));
+    groupObstacles.forEach(function (obstacle) {
+      minY = Math.min(minY, obstacle.top);
+      maxY = Math.max(maxY, obstacle.bottom);
+    });
+    var groupObstacleById = {};
+    groupObstacles.forEach(function (obstacle) { groupObstacleById[obstacle.id] = obstacle; });
+    var obstacleIndex = createRouteObstacleIndex(nodeObstacles.concat(groupObstacles), 180);
+    var segmentIndex = createRouteSegmentIndex(90);
+    var groupXBoundaries = uniqueRouteValues(groupObstacles.reduce(function (values, obstacle) {
+      return values.concat([obstacle.left - 10, obstacle.right + 10]);
+    }, []));
+    var groupYBoundaries = uniqueRouteValues(groupObstacles.reduce(function (values, obstacle) {
+      return values.concat([obstacle.top - 10, obstacle.bottom + 10]);
+    }, []));
+    graph.routeLeft = minX;
+    graph.routeRight = maxX;
+    graph.routeTop = minY;
+    graph.routeBottom = maxY;
+    assignFunctionEdgePorts(graph.edges);
 
-    graph.edges.slice().sort(compareRouteEdges).forEach(function (edgeInfo) {
+    graph.edges.slice().sort(compareRouteEdges).forEach(function (edgeInfo, edgeIndex) {
       var source = byId[edgeInfo.source], target = byId[edgeInfo.target];
-      var sourceExit = source.cy + source.h / 2 + 24;
-      var targetEntry = target.cy - target.h / 2 - 24;
-      var top = Math.min(sourceExit, targetEntry);
-      var bottom = Math.max(sourceExit, targetEntry);
-      var candidates = [];
-      for (var x = gridLeft; x <= gridRight; x += 5) {
-        var crossesNode = nodeObstacles.some(function (obstacle) {
-          if (obstacle.id === edgeInfo.source || obstacle.id === edgeInfo.target) return false;
-          if (bottom <= obstacle.top - 5 || top >= obstacle.bottom + 5) return false;
-          return x > obstacle.left - 5 && x < obstacle.right + 5;
+      if (!source || !target) return;
+      var x1 = source.cx + (edgeInfo.sourcePortOffset || 0);
+      var y1 = source.cy + source.h / 2;
+      var x2 = target.cx + (edgeInfo.targetPortOffset || 0);
+      var y2 = target.cy - target.h / 2;
+      var sourceExit = y1 + 20;
+      var targetEntry = y2 - 20;
+      var desired = (x1 + x2) / 2;
+      var candidateSet = {};
+      function addCandidate(x) { candidateSet[String(Math.round(x))] = Math.round(x); }
+      for (var offset = -60; offset <= 60; offset += 6) addCandidate(desired + offset);
+      [source.cx - source.w / 2 - 10, source.cx + source.w / 2 + 10,
+        target.cx - target.w / 2 - 10, target.cx + target.w / 2 + 10,
+        minX - 24 - edgeIndex % 7 * 6, maxX + 24 + edgeIndex % 7 * 6].forEach(addCandidate);
+      nearestRouteValues(groupXBoundaries, desired, 12).forEach(addCandidate);
+      [groupObstacleById[source.objectId], groupObstacleById[target.objectId]].filter(Boolean).forEach(function (obstacle) {
+        addCandidate(obstacle.left - 10);
+        addCandidate(obstacle.right + 10);
+      });
+      var candidates = Object.keys(candidateSet).map(function (key) { return candidateSet[key]; }).sort(function (left, right) {
+        return Math.abs(left - desired) - Math.abs(right - desired) || left - right;
+      });
+      var reversed = y2 <= y1;
+      if (reversed) {
+        var sideLeft = Math.min(source.cx - source.w / 2, target.cx - target.w / 2) - 10;
+        var sideRight = Math.max(source.cx + source.w / 2, target.cx + target.w / 2) + 10;
+        candidates = candidates.filter(function (candidate) {
+          return candidate <= sideLeft || candidate >= sideRight;
         });
-        if (crossesNode) continue;
-        var crossesGroup = (graph.groups || []).some(function (groupInfo) {
-          if (groupInfo.id === source.objectId || groupInfo.id === target.objectId) return false;
-          if (bottom <= groupInfo.top || top >= groupInfo.bottom) return false;
-          return x > groupInfo.left - 5 && x < groupInfo.left + groupInfo.width + 5;
-        });
-        if (!crossesGroup) candidates.push(x);
       }
-      if (!candidates.length) candidates = [gridLeft, gridRight];
-
-      var desired = (source.cx + target.cx) / 2;
-      var bestX = candidates[0], bestScore = Infinity;
-      candidates.forEach(function (candidate) {
-        var conflicts = (channelIntervals[candidate] || []).filter(function (interval) {
-          return !(bottom + 4 <= interval.top || top - 4 >= interval.bottom);
-        }).length;
-        var score = Math.abs(candidate - source.cx) + Math.abs(candidate - target.cx) + conflicts * 80;
-        if (candidate < minX || candidate > maxX) score += 12;
-        if (score < bestScore || (score === bestScore && Math.abs(candidate - desired) < Math.abs(bestX - desired))) {
-          bestX = candidate;
+      var bestPoints = null, bestSegments = null, bestScore = Infinity;
+      var excludedObstacles = {};
+      excludedObstacles[edgeInfo.source] = true;
+      excludedObstacles[edgeInfo.target] = true;
+      if (source.objectId) excludedObstacles[source.objectId] = true;
+      if (target.objectId) excludedObstacles[target.objectId] = true;
+      function considerRoute(points, outside) {
+        points = compactRoutePoints(points);
+        var segments = routeSegments(points);
+        var obstacleCount = indexedRouteObstacleCount(segments, obstacleIndex, excludedObstacles);
+        var score = obstacleCount * 1000000 + routeLength(segments) +
+          routeInteractionCost(segments, segmentIndex, edgeInfo.pathIndex) +
+          (outside ? 12 : 0);
+        if (score < bestScore) {
+          bestPoints = points;
+          bestSegments = segments;
           bestScore = score;
         }
+      }
+      candidates.forEach(function (candidate) {
+        considerRoute([
+          { x: x1, y: y1 },
+          { x: x1, y: sourceExit },
+          { x: candidate, y: sourceExit },
+          { x: candidate, y: targetEntry },
+          { x: x2, y: targetEntry },
+          { x: x2, y: y2 },
+        ], candidate < minX || candidate > maxX);
       });
-      (channelIntervals[bestX] = channelIntervals[bestX] || []).push({ top: top, bottom: bottom });
-      edgeInfo.route = "outer";
-      edgeInfo.routeX = bestX;
-      routeLeft = Math.min(routeLeft, bestX);
-      routeRight = Math.max(routeRight, bestX);
+      var desiredY = (y1 + y2) / 2;
+      var yCandidateSet = {};
+      function addYCandidate(y) { yCandidateSet[String(Math.round(y))] = Math.round(y); }
+      for (var yOffset = -60; yOffset <= 60; yOffset += 6) addYCandidate(desiredY + yOffset);
+      [minY - 24 - edgeIndex % 7 * 6, maxY + 24 + edgeIndex % 7 * 6].forEach(addYCandidate);
+      nearestRouteValues(groupYBoundaries, desiredY, 12).forEach(addYCandidate);
+      [groupObstacleById[source.objectId], groupObstacleById[target.objectId]].filter(Boolean).forEach(function (obstacle) {
+        addYCandidate(obstacle.top - 10);
+        addYCandidate(obstacle.bottom + 10);
+      });
+      if (!reversed) {
+        Object.keys(yCandidateSet).map(function (key) { return yCandidateSet[key]; }).sort(function (top, bottom) {
+          return Math.abs(top - desiredY) - Math.abs(bottom - desiredY) || top - bottom;
+        }).forEach(function (candidate) {
+          considerRoute([
+            { x: x1, y: y1 },
+            { x: x1, y: candidate },
+            { x: x2, y: candidate },
+            { x: x2, y: y2 },
+          ], candidate < minY || candidate > maxY);
+        });
+      }
+      var sourceBounds = groupObstacleById[source.objectId] || {
+        left: source.cx - source.w / 2,
+        right: source.cx + source.w / 2,
+      };
+      var targetBounds = groupObstacleById[target.objectId] || {
+        left: target.cx - target.w / 2,
+        right: target.cx + target.w / 2,
+      };
+      var outerLeft = minX - 30 - edgeIndex % 7 * 6;
+      var outerRight = maxX + 30 + edgeIndex % 7 * 6;
+      var sourceSides = uniqueRouteValues([sourceBounds.left - 10, sourceBounds.right + 10, outerLeft, outerRight]);
+      var targetSides = uniqueRouteValues([targetBounds.left - 10, targetBounds.right + 10, outerLeft, outerRight]);
+      sourceSides.forEach(function (sourceSide) {
+        targetSides.forEach(function (targetSide) {
+          [minY - 30 - edgeIndex % 7 * 6, maxY + 30 + edgeIndex % 7 * 6].forEach(function (outerY) {
+            considerRoute([
+              { x: x1, y: y1 },
+              { x: x1, y: sourceExit },
+              { x: sourceSide, y: sourceExit },
+              { x: sourceSide, y: outerY },
+              { x: targetSide, y: outerY },
+              { x: targetSide, y: targetEntry },
+              { x: x2, y: targetEntry },
+              { x: x2, y: y2 },
+            ], true);
+          });
+        });
+      });
+      edgeInfo.route = "points";
+      edgeInfo.routePoints = bestPoints;
+      bestSegments.forEach(function (segment) {
+        segment.pathIndex = edgeInfo.pathIndex;
+        addRouteSegment(segmentIndex, segment);
+      });
+      bestPoints.forEach(function (point) {
+        graph.routeLeft = Math.min(graph.routeLeft, point.x);
+        graph.routeRight = Math.max(graph.routeRight, point.x);
+        graph.routeTop = Math.min(graph.routeTop, point.y);
+        graph.routeBottom = Math.max(graph.routeBottom, point.y);
+      });
     });
-    graph.routeLeft = routeLeft;
-    graph.routeRight = routeRight;
-    assignFunctionEdgePorts(graph.edges);
+  }
+
+  function compactRoutePoints(points) {
+    return points.filter(function (point, index) {
+      return !index || point.x !== points[index - 1].x || point.y !== points[index - 1].y;
+    });
+  }
+
+  function routeSegments(points) {
+    var segments = [];
+    for (var index = 1; index < points.length; index += 1) {
+      var start = points[index - 1], end = points[index];
+      if (start.x === end.x && start.y === end.y) continue;
+      segments.push({
+        x1: Math.min(start.x, end.x),
+        x2: Math.max(start.x, end.x),
+        y1: Math.min(start.y, end.y),
+        y2: Math.max(start.y, end.y),
+        vertical: start.x === end.x,
+      });
+    }
+    return segments;
+  }
+
+  function routeObstacleCount(segments, obstacles) {
+    var collisions = 0;
+    segments.forEach(function (segment) {
+      obstacles.forEach(function (obstacle) {
+        if (routeSegmentHitsObstacle(segment, obstacle)) collisions += 1;
+      });
+    });
+    return collisions;
+  }
+
+  function routeSegmentHitsObstacle(segment, obstacle) {
+    if (segment.vertical) {
+      return segment.x1 > obstacle.left - 5 && segment.x1 < obstacle.right + 5 &&
+        segment.y2 > obstacle.top - 5 && segment.y1 < obstacle.bottom + 5;
+    }
+    return segment.y1 > obstacle.top - 5 && segment.y1 < obstacle.bottom + 5 &&
+      segment.x2 > obstacle.left - 5 && segment.x1 < obstacle.right + 5;
+  }
+
+  function createRouteObstacleIndex(obstacles, cellSize) {
+    var index = { cells: {}, cellSize: cellSize, obstacles: obstacles };
+    obstacles.forEach(function (obstacle, obstacleIndex) {
+      var left = Math.floor((obstacle.left - 5) / cellSize);
+      var right = Math.floor((obstacle.right + 5) / cellSize);
+      var top = Math.floor((obstacle.top - 5) / cellSize);
+      var bottom = Math.floor((obstacle.bottom + 5) / cellSize);
+      for (var x = left; x <= right; x += 1) {
+        for (var y = top; y <= bottom; y += 1) {
+          var key = x + ":" + y;
+          (index.cells[key] = index.cells[key] || []).push(obstacleIndex);
+        }
+      }
+    });
+    return index;
+  }
+
+  function indexedRouteObstacleCount(segments, index, excluded) {
+    var collisions = 0;
+    segments.forEach(function (segment) {
+      var seen = {};
+      routeSegmentCells(segment, index.cellSize, 5).forEach(function (key) {
+        (index.cells[key] || []).forEach(function (obstacleIndex) {
+          if (seen[obstacleIndex]) return;
+          seen[obstacleIndex] = true;
+          var obstacle = index.obstacles[obstacleIndex];
+          if (excluded[obstacle.id]) return;
+          if (routeSegmentHitsObstacle(segment, obstacle)) collisions += 1;
+        });
+      });
+    });
+    return collisions;
+  }
+
+  function createRouteSegmentIndex(cellSize) {
+    return { cells: {}, cellSize: cellSize };
+  }
+
+  function addRouteSegment(index, segment) {
+    var orientation = segment.vertical ? "vertical" : "horizontal";
+    var laneKey = String(segment.vertical ? segment.x1 : segment.y1);
+    routeSegmentCells(segment, index.cellSize, 0).forEach(function (key) {
+      var cell = index.cells[key] = index.cells[key] || {
+        vertical: routeUsage(),
+        horizontal: routeUsage(),
+      };
+      var usage = cell[orientation];
+      addRouteUsage(usage, segment.pathIndex);
+      var lane = usage.lanes[laneKey] = usage.lanes[laneKey] || routeUsage();
+      addRouteUsage(lane, segment.pathIndex);
+    });
+  }
+
+  function routeUsage() {
+    return { total: 0, colors: {}, lanes: {} };
+  }
+
+  function addRouteUsage(usage, pathIndex) {
+    var colorKey = String(pathIndex);
+    usage.total += 1;
+    usage.colors[colorKey] = (usage.colors[colorKey] || 0) + 1;
+  }
+
+  function routeSegmentCells(segment, cellSize, padding) {
+    var left = Math.floor((segment.x1 - padding) / cellSize);
+    var right = Math.floor((segment.x2 + padding) / cellSize);
+    var top = Math.floor((segment.y1 - padding) / cellSize);
+    var bottom = Math.floor((segment.y2 + padding) / cellSize);
+    var cells = [];
+    for (var x = left; x <= right; x += 1) {
+      for (var y = top; y <= bottom; y += 1) cells.push(x + ":" + y);
+    }
+    return cells;
+  }
+
+  function uniqueRouteValues(values) {
+    var seen = {};
+    return values.filter(function (value) {
+      var key = String(value);
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    }).sort(function (left, right) { return left - right; });
+  }
+
+  function nearestRouteValues(values, target, limit) {
+    var low = 0, high = values.length;
+    while (low < high) {
+      var middle = Math.floor((low + high) / 2);
+      if (values[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    var left = low - 1, right = low, nearest = [];
+    while (nearest.length < limit && (left >= 0 || right < values.length)) {
+      if (left < 0) nearest.push(values[right++]);
+      else if (right >= values.length) nearest.push(values[left--]);
+      else if (Math.abs(values[left] - target) <= Math.abs(values[right] - target)) nearest.push(values[left--]);
+      else nearest.push(values[right++]);
+    }
+    return nearest;
+  }
+
+  function routeLength(segments) {
+    return segments.reduce(function (length, segment) {
+      return length + segment.x2 - segment.x1 + segment.y2 - segment.y1;
+    }, 0);
+  }
+
+  // Each occupied spatial cell stores aggregate lane and colour counts. Route
+  // scoring therefore stays bounded even when thousands of edges share one
+  // outer corridor; denser cells simply receive a larger penalty.
+  function routeInteractionCost(segments, index, pathIndex) {
+    var cost = 0;
+    var colorKey = String(pathIndex);
+    segments.forEach(function (segment) {
+      var orientation = segment.vertical ? "vertical" : "horizontal";
+      var crossingOrientation = segment.vertical ? "horizontal" : "vertical";
+      var laneKey = String(segment.vertical ? segment.x1 : segment.y1);
+      routeSegmentCells(segment, index.cellSize, 0).forEach(function (key) {
+        var cell = index.cells[key];
+        if (!cell) return;
+        var sameLane = cell[orientation].lanes[laneKey];
+        if (sameLane) {
+          var sameLaneColor = sameLane.colors[colorKey] || 0;
+          cost += sameLaneColor * 45 + (sameLane.total - sameLaneColor) * 220;
+        }
+        var crossing = cell[crossingOrientation];
+        var crossingColor = crossing.colors[colorKey] || 0;
+        cost += crossingColor * 8 + (crossing.total - crossingColor) * 24;
+      });
+    });
+    return cost;
   }
 
   function layoutGlobalGraph(graph) {
@@ -1421,9 +1722,7 @@
       itemsById[item.id] = item;
     });
 
-    var available = graph.kind === "pipeline-overview"
-      ? Math.min(3600, Math.max(1600, Math.ceil(Math.sqrt(graph.items.length)) * 210))
-      : 1200;
+    var available = 1200;
     var groupGap = 28;
     graph.groups.forEach(function (methodGroup) {
       var groupItems = methodGroup.itemIds.map(function (id) { return itemsById[id]; }).filter(Boolean);
@@ -1438,8 +1737,10 @@
       var innerColumns = groupItems.length > 3 && available >= 760 ? 2 : 1;
       var maxGroupWidth = Math.max(280, Math.min(620, available));
       if (graph.kind === "pipeline-overview") {
-        maxGroupWidth = Math.min(1100, available);
-        innerColumns = Math.max(1, Math.min(4, Math.floor((maxGroupWidth - 40) / (maxWidth + 22))));
+        innerColumns = Math.max(1, Math.min(12, Math.round(Math.sqrt(
+          groupItems.length * 1.6 * (NODE_H + 30) / (maxWidth + 22)
+        ))));
+        maxGroupWidth = innerColumns * maxWidth + (innerColumns - 1) * 22 + 40;
       }
       while (innerColumns > 1 && innerColumns * maxWidth + (innerColumns - 1) * 22 + 40 > maxGroupWidth) {
         innerColumns -= 1;
@@ -1464,7 +1765,9 @@
       var usedWidth = Math.max.apply(null, groupItems.map(function (item) {
         return Math.abs(item.localX) * 2 + item.w;
       }));
-      methodGroup.width = Math.min(available, Math.max(280, usedWidth + 40));
+      methodGroup.width = graph.kind === "pipeline-overview"
+        ? Math.max(280, usedWidth + 40)
+        : Math.min(available, Math.max(280, usedWidth + 40));
       methodGroup.height = localY + 2;
     });
 
@@ -1473,35 +1776,43 @@
     var cursorX = leftEdge;
     var cursorY = 0;
     var rowHeight = 0;
-    graph.groups.forEach(function (methodGroup) {
-      if (graph.kind === "pipeline-overview") {
-        methodGroup.left = -methodGroup.width / 2;
+    if (graph.kind === "pipeline-overview") {
+      var packing = packRegions(graph.groups.map(function (methodGroup, index) {
+        return { id: methodGroup.id, width: methodGroup.width, height: methodGroup.height, order: index };
+      }), groupGap, 1.6);
+      available = Math.max(available, packing.width);
+      graph.leftEdge = -packing.width / 2;
+      graph.groups.forEach(function (methodGroup) {
+        var placement = packing.placements[methodGroup.id];
+        methodGroup.left = graph.leftEdge + placement.x;
+        methodGroup.top = placement.y;
+        methodGroup.bottom = placement.y + methodGroup.height;
+        methodGroup.headerY = placement.y + 25;
+        methodGroup.items.forEach(function (item) {
+          item.cx = methodGroup.left + methodGroup.width / 2 + item.localX;
+          item.cy = methodGroup.top + item.localY;
+        });
+      });
+      cursorY = packing.height;
+    } else {
+      graph.groups.forEach(function (methodGroup) {
+        if (cursorX > leftEdge && cursorX + methodGroup.width > available / 2) {
+          cursorX = leftEdge;
+          cursorY += rowHeight + groupGap;
+          rowHeight = 0;
+        }
+        methodGroup.left = cursorX;
         methodGroup.top = cursorY;
         methodGroup.bottom = cursorY + methodGroup.height;
         methodGroup.headerY = cursorY + 25;
         methodGroup.items.forEach(function (item) {
-          item.cx = item.localX;
+          item.cx = cursorX + methodGroup.width / 2 + item.localX;
           item.cy = cursorY + item.localY;
         });
-        cursorY = methodGroup.bottom + groupGap;
-        return;
-      }
-      if (cursorX > leftEdge && cursorX + methodGroup.width > available / 2) {
-        cursorX = leftEdge;
-        cursorY += rowHeight + groupGap;
-        rowHeight = 0;
-      }
-      methodGroup.left = cursorX;
-      methodGroup.top = cursorY;
-      methodGroup.bottom = cursorY + methodGroup.height;
-      methodGroup.headerY = cursorY + 25;
-      methodGroup.items.forEach(function (item) {
-        item.cx = cursorX + methodGroup.width / 2 + item.localX;
-        item.cy = cursorY + item.localY;
+        cursorX += methodGroup.width + groupGap;
+        rowHeight = Math.max(rowHeight, methodGroup.height);
       });
-      cursorX += methodGroup.width + groupGap;
-      rowHeight = Math.max(rowHeight, methodGroup.height);
-    });
+    }
 
     var freeItems = graph.freeItemIds.map(function (id) { return itemsById[id]; }).filter(Boolean).sort(compareMethodItems);
     graph.freeTop = graph.groups.length
@@ -1525,6 +1836,58 @@
       freeY += NODE_H + 34;
     }
     graph.freeBottom = freeItems.length ? freeY - 34 : graph.freeTop;
+  }
+
+  // Best-fit shelves keep variable-sized pipeline compartments in a compact
+  // rectangle. Several deterministic widths are evaluated so one unusually
+  // large pipeline does not force every smaller pipeline into a column.
+  function packRegions(regions, gap, targetAspect) {
+    if (!regions.length) return { width: 0, height: 0, placements: {} };
+    var area = regions.reduce(function (sum, region) {
+      return sum + (region.width + gap) * (region.height + gap);
+    }, 0);
+    var maximumWidth = regions.reduce(function (maximum, region) {
+      return Math.max(maximum, region.width);
+    }, 0);
+    var baseWidth = Math.max(maximumWidth, Math.sqrt(area * targetAspect));
+    var best = null;
+    [0.8, 1, 1.2, 1.4, 1.6, 1.8].forEach(function (factor) {
+      var targetWidth = Math.max(maximumWidth, baseWidth * factor);
+      var shelves = [];
+      var placements = {};
+      regions.slice().sort(function (left, right) {
+        return right.height - left.height || right.width - left.width || left.order - right.order;
+      }).forEach(function (region) {
+        var shelf = null, remaining = Infinity;
+        shelves.forEach(function (candidate) {
+          var nextX = candidate.used ? candidate.used + gap : 0;
+          var unused = targetWidth - nextX - region.width;
+          if (unused >= 0 && unused < remaining) {
+            shelf = candidate;
+            remaining = unused;
+          }
+        });
+        if (!shelf) {
+          var top = shelves.length
+            ? shelves[shelves.length - 1].top + shelves[shelves.length - 1].height + gap
+            : 0;
+          shelf = { top: top, height: region.height, used: 0 };
+          shelves.push(shelf);
+        }
+        var x = shelf.used ? shelf.used + gap : 0;
+        placements[region.id] = { x: x, y: shelf.top };
+        shelf.used = x + region.width;
+      });
+      var width = shelves.reduce(function (maximum, shelf) { return Math.max(maximum, shelf.used); }, 0);
+      var lastShelf = shelves[shelves.length - 1];
+      var height = lastShelf.top + lastShelf.height;
+      var aspectError = Math.abs(width / Math.max(1, height) - targetAspect);
+      var score = width * height * (1 + aspectError * 0.65);
+      if (!best || score < best.score) {
+        best = { width: width, height: height, placements: placements, score: score };
+      }
+    });
+    return best;
   }
 
   function layoutObjectMethodGraph(graph) {
@@ -1714,14 +2077,55 @@
     showGraph();
     renderCrumbs();
     renderTools();
-    var graph = currentGraph();
-    var topologyKey = graphTopologyKey(graph);
-    var topologyChanged = topologyKey !== lastTopologyKey;
-    layout(graph);
+    var prepared = prepareGraph();
+    var graph = prepared.graph;
+    var topologyChanged = prepared.topologyChanged;
     if (topologyChanged) fitView(graph);
     draw(graph);
-    lastTopologyKey = topologyKey;
     syncZoomReadout();
+  }
+
+  // Geometry is a function of topology, not selection. Reuse the laid-out
+  // graph for emphasis-only interactions and copy over the fresh trace state.
+  function prepareGraph() {
+    var fresh = currentGraph();
+    var topologyKey = graphTopologyKey(fresh);
+    var topologyChanged = topologyKey !== lastTopologyKey || !lastLaidOutGraph;
+    if (topologyChanged) {
+      layout(fresh);
+      lastLaidOutGraph = fresh;
+      lastTopologyKey = topologyKey;
+      return { graph: fresh, topologyChanged: true };
+    }
+    synchronizeTracePresentation(lastLaidOutGraph, fresh);
+    return { graph: lastLaidOutGraph, topologyChanged: false };
+  }
+
+  function synchronizeTracePresentation(target, source) {
+    ["center", "traceActive", "traceStart", "traceEnd", "route", "noRoute"].forEach(function (property) {
+      if (source[property] === undefined) delete target[property];
+      else target[property] = source[property];
+    });
+    var sourceItems = {};
+    source.items.forEach(function (item) { sourceItems[item.id] = item; });
+    target.items.forEach(function (item) {
+      var sourceItem = sourceItems[item.id] || {};
+      ["traceOrder", "traceRole", "traceFile"].forEach(function (property) {
+        if (sourceItem[property] === undefined) delete item[property];
+        else item[property] = sourceItem[property];
+      });
+      if (!item.card) return;
+      if (sourceItem.card && sourceItem.card.traceFunctionIds) {
+        item.card.traceFunctionIds = sourceItem.card.traceFunctionIds;
+      } else {
+        delete item.card.traceFunctionIds;
+      }
+    });
+    target.edges.forEach(function (edgeInfo, index) {
+      var sourceEdge = source.edges[index] || {};
+      if (sourceEdge.inTrace === undefined) delete edgeInfo.inTrace;
+      else edgeInfo.inTrace = sourceEdge.inTrace;
+    });
   }
 
   function graphTopologyKey(graph) {
@@ -1734,6 +2138,9 @@
       graph.edges.map(function (edgeInfo) {
         return (edgeInfo.sourceFunction || edgeInfo.source) + ">" + (edgeInfo.targetFunction || edgeInfo.target);
       }).sort().join(","),
+      (graph.groups || []).map(function (groupInfo) {
+        return groupInfo.id + ":" + (groupInfo.itemIds || []).slice().sort().join(",");
+      }).join(";"),
     ].join("|");
   }
 
@@ -2258,6 +2665,11 @@
     var y1 = a.cy + ah / 2;
     var x2 = b.cx + ((edgeInfo && edgeInfo.targetPortOffset) || 0);
     var y2 = b.cy - bh / 2;
+    if (edgeInfo && edgeInfo.routePoints && edgeInfo.routePoints.length) {
+      return edgeInfo.routePoints.reduce(function (path, point, index) {
+        return path + (index ? " L" : "M") + point.x + "," + point.y;
+      }, "");
+    }
     if (edgeInfo && edgeInfo.route === "corridor") {
       return "M" + x1 + "," + y1 +
         " V" + edgeInfo.routeY +
@@ -2687,6 +3099,7 @@
 
   function renderViews() {
     var views = [
+      ["graph", "Graph"],
       ["summary", "Summary"],
       ["use-cases", "Use cases"],
       ["functions", "Functions"],
@@ -2704,7 +3117,7 @@
   function renderSidebarTabs() {
     var tabs = [
       ["pages", "Pages"],
-      ["navigation", "Navigation"],
+      ["navigation", "Files"],
       ["review", "Review"],
     ];
     sidebarTabs.innerHTML = tabs.map(function (tab) {
@@ -2725,11 +3138,21 @@
   }
 
   function setWorkspace(workspace) {
-    if (!isReviewWorkspace(workspace) || state.workspace === workspace) return;
+    if (!isWorkspace(workspace) || state.workspace === workspace) return;
     recordNavigation();
     clearGraphPromptState();
     clearTraceState();
     state.workspace = workspace;
+    if (workspace === "graph") {
+      state.scope = tree.path;
+      state.mode = "global";
+      state.focus = null;
+      state.graphSelection = null;
+      state.graphSelectionType = null;
+      state.detailSelection = null;
+      state.objectFocus = null;
+      state.hovered = null;
+    }
     rerender();
   }
 
@@ -2742,52 +3165,9 @@
   function renderNavigationSurface() {
     var shell = document.querySelector(".shell");
     shell.classList.toggle("rail-collapsed", state.navigationCollapsed);
-    navigationModes.innerHTML =
-      '<button class="navigation-mode' + (state.navigationSurface === "tree" ? " active" : "") + '" data-navigation="tree" aria-pressed="' + (state.navigationSurface === "tree") + '">Tree</button>' +
-      '<button class="navigation-mode' + (state.navigationSurface === "city" ? " active" : "") + '" data-navigation="city" aria-pressed="' + (state.navigationSurface === "city") + '">City map</button>';
-    navigationModes.querySelectorAll("[data-navigation]").forEach(function (button) {
-      button.addEventListener("click", function () { setNavigationSurface(button.getAttribute("data-navigation")); });
-    });
     viewPanel.hidden = state.sidebarTab !== "pages";
-    navigationModes.hidden = state.sidebarTab !== "navigation";
-    treePanel.hidden = state.sidebarTab !== "navigation" || state.navigationSurface !== "tree";
-    cityMapRail.hidden = state.sidebarTab !== "navigation" || state.navigationSurface !== "city";
-    if (state.sidebarTab === "navigation" && state.navigationSurface === "tree") renderTree();
-    if (state.sidebarTab === "navigation" && state.navigationSurface === "city") renderCityMapRail();
-  }
-
-  function setNavigationSurface(surface) {
-    if ((surface !== "tree" && surface !== "city") || state.navigationSurface === surface) return;
-    recordNavigation();
-    state.navigationSurface = surface;
-    rerender();
-  }
-
-  function renderCityMapRail() {
-    if (!citymap.files.length) {
-      cityMapRail.innerHTML = '<p class="city-map-rail-empty">No repository files were found.</p>';
-      return;
-    }
-
-    var path = state.cityPath || "";
-    var parent = path ? cityDirByPath[path] : { content_rect: citymap.layout.root_content_rect || { x: 0, z: 0, w: 120, d: 120 } };
-    var items = cityMapItems(path);
-    var svg = '<svg class="city-map-svg" viewBox="0 0 120 120" role="group" aria-label="Repository city map for ' +
-      escapeAttr(path || "repository") + '"><title>' + escape(path || "repository") + " city map</title>" +
-      '<rect class="city-map-ground" x="0" y="0" width="120" height="120"></rect>';
-    items.forEach(function (item) {
-      svg += item.kind === "dir"
-        ? cityMapDirectoryTile(item, parent.content_rect)
-        : cityMapFileTile(item, parent.content_rect);
-    });
-    svg += "</svg>";
-
-    cityMapRail.innerHTML =
-      '<div class="city-map-rail-head"><span>City map</span><button data-city-path="">Root</button></div>' +
-      cityMapBreadcrumb(path) +
-      '<div class="city-map-rail-canvas">' + svg + "</div>" +
-      '<section class="city-information" aria-live="polite">' + cityMapInformation() + "</section>";
-    bindCityMapRailActions();
+    treePanel.hidden = state.sidebarTab !== "navigation";
+    if (state.sidebarTab === "navigation") renderTree();
   }
 
   function renderNavigation() {
@@ -2811,19 +3191,16 @@
   function navigationSnapshot() {
     return {
       workspace: state.workspace,
-      navigationSurface: state.navigationSurface,
       scope: state.scope,
       mode: state.mode,
       globalView: state.globalView,
       focus: state.focus,
       graphSelection: state.graphSelection,
       graphSelectionType: state.graphSelectionType,
-      mapSelection: state.mapSelection && { kind: state.mapSelection.kind, path: state.mapSelection.path },
       detailSelection: state.detailSelection && { type: state.detailSelection.type, id: state.detailSelection.id },
       objectFocus: state.objectFocus,
       traceStart: state.traceStart,
       traceEnd: state.traceEnd,
-      cityPath: state.cityPath,
       useCaseSelections: Object.assign({}, state.useCaseSelections),
       useCaseLayerSelections: Object.assign({}, state.useCaseLayerSelections),
       collapsedUseCases: Object.assign({}, state.collapsedUseCases),
@@ -2835,19 +3212,16 @@
   function restoreNavigation(snapshot) {
     clearGraphPromptState();
     state.workspace = snapshot.workspace;
-    state.navigationSurface = snapshot.navigationSurface || "city";
     state.scope = snapshot.scope;
     state.mode = snapshot.mode;
     state.globalView = snapshot.globalView || "files";
     state.focus = snapshot.focus;
     state.graphSelection = snapshot.graphSelection;
     state.graphSelectionType = snapshot.graphSelectionType;
-    state.mapSelection = snapshot.mapSelection;
     state.detailSelection = snapshot.detailSelection;
     state.objectFocus = snapshot.objectFocus || null;
     state.traceStart = snapshot.traceStart || null;
     state.traceEnd = snapshot.traceEnd || null;
-    state.cityPath = snapshot.cityPath || "";
     state.hovered = null;
     state.lastFunctionClick = null;
     state.useCaseSelections = Object.assign({}, snapshot.useCaseSelections);
@@ -3262,19 +3636,6 @@
     treePanel.querySelectorAll("[data-scope]").forEach(function (row) {
       row.addEventListener("click", function () { setScope(row.getAttribute("data-scope")); });
     });
-    treePanel.querySelectorAll("[data-fn]").forEach(function (row) {
-      row.addEventListener("click", function (event) {
-        var functionId = row.getAttribute("data-fn");
-        if (event.shiftKey) selectTraceEndpoint(functionId);
-        else selectFunction(functionId);
-      });
-    });
-    treePanel.querySelectorAll("[data-toggle-fn]").forEach(function (button) {
-      button.addEventListener("click", function (event) {
-        event.stopPropagation();
-        toggleFunction(button.getAttribute("data-toggle-fn"));
-      });
-    });
     syncTreeSelection();
   }
 
@@ -3290,7 +3651,7 @@
 
   function treeRows(node, depth) {
     var open = state.expanded[node.path];
-    var hasChildren = node.children.length || (node.function_ids && node.function_ids.length);
+    var hasChildren = node.children.length;
     var twirl = hasChildren
       ? '<button type="button" class="twirl" aria-expanded="' + !!open + '" aria-label="' +
         (open ? "Collapse " : "Expand ") + escapeAttr(node.path || "all") + '" data-twirl="' + escapeAttr(node.path) + '">' + (open ? "▾" : "▸") + "</button>"
@@ -3305,15 +3666,6 @@
       "</div>";
     if (open) {
       node.children.forEach(function (child) { html += treeRows(child, depth + 1); });
-      if (node.type === "module") {
-        node.function_ids.forEach(function (id) {
-          var fn = nodeById[id];
-          var inactive = state.disabled[id];
-          html += '<div class="trow tfn ' + statusClass(fn) + (inactive ? " deactivated" : "") + '" role="listitem" aria-level="' + (depth + 2) + '" style="--d:' + (depth + 1) + '">' +
-            '<span class="twirl empty"></span><button type="button" class="trow-action" aria-label="Inspect function ' + escapeAttr(fn.name) + '" data-fn="' + escapeAttr(id) + '"><span class="tdot"></span><span class="tname">' + escape(fn.name) + "</span></button>" +
-            '<button class="fn-toggle" data-toggle-fn="' + escapeAttr(id) + '">' + (inactive ? "activate" : "deactivate") + "</button></div>";
-        });
-      }
     }
     return html;
   }
@@ -3330,16 +3682,12 @@
     treePanel.querySelectorAll(".trow").forEach(function (row) {
       var path = row.getAttribute("data-path");
       var scopeAction = row.querySelector("[data-scope]");
-      var functionAction = row.querySelector("[data-fn]");
       var scoped = path === state.scope;
-      var functionId = functionAction ? functionAction.getAttribute("data-fn") : null;
-      var selected = functionId === state.graphSelection;
+      var selected = state.graphSelectionType === "file" && path === state.graphSelection;
       row.classList.toggle("scoped", scoped);
       row.classList.toggle("active", selected);
       if (scopeAction && scoped) scopeAction.setAttribute("aria-current", "location");
       else if (scopeAction) scopeAction.removeAttribute("aria-current");
-      if (functionAction) functionAction.setAttribute("aria-pressed", String(selected));
-      row.classList.toggle("deactivated", !!state.disabled[functionId]);
     });
   }
 
@@ -3555,8 +3903,7 @@
 
     function setPanelWidth(width) {
       var shellWidth = shell.getBoundingClientRect().width || window.innerWidth;
-      var sidebarWidth = document.querySelector(".sidebar").getBoundingClientRect().width || 0;
-      var maximum = Math.max(360, shellWidth - sidebarWidth - 360);
+      var maximum = Math.max(360, shellWidth - 360);
       var next = Math.round(Math.max(360, Math.min(maximum, width)));
       shell.style.setProperty("--detail-width", next + "px");
       resize.setAttribute("aria-valuemin", "360");
@@ -3626,7 +3973,7 @@
     startTrace(methodId);
   }
 
-  // --- source inspector + city-map rail ----------------------------------
+  // --- source inspector ---------------------------------------------------
 
   function renderDetail() {
     var panel = document.getElementById("detail");
@@ -3755,254 +4102,6 @@
     return core.combineReviewPrompts(
       state.reviewPromptItems.map(function (item) { return item.prompt; })
     );
-  }
-
-  function bindCityMapRailActions() {
-    cityMapRail.querySelectorAll("[data-city-path]").forEach(function (button) {
-      button.addEventListener("click", function () { openCityPath(button.getAttribute("data-city-path")); });
-    });
-    cityMapRail.querySelectorAll("[data-city-directory]").forEach(function (tile) {
-      function open() {
-        openCityPath(tile.getAttribute("data-city-directory"));
-      }
-      tile.addEventListener("click", open);
-      tile.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        open();
-      });
-    });
-    cityMapRail.querySelectorAll("[data-city-select]").forEach(function (tile) {
-      function select() {
-        selectCityItem(tile.getAttribute("data-city-kind"), tile.getAttribute("data-city-select"));
-      }
-      tile.addEventListener("click", select);
-      tile.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        select();
-      });
-    });
-    cityMapRail.querySelectorAll("[data-city-callable]").forEach(function (button) {
-      button.addEventListener("click", function () { selectCityCallable(button.getAttribute("data-city-callable")); });
-    });
-  }
-
-  function cityMapInformation() {
-    if (!state.mapSelection) {
-      return '<div class="city-information-empty"><h2>Map information</h2><p>Select a file or directory to inspect its structural facts.</p></div>';
-    }
-    if (state.mapSelection.kind === "dir") return cityDirectoryInformation(cityDirByPath[state.mapSelection.path]);
-    return cityFileInformation(cityFileByPath[state.mapSelection.path]);
-  }
-
-  function cityDirectoryInformation(directory) {
-    if (!directory) return "";
-    var facts = directory.facts;
-    return '<div><h2>' + escape(directory.path) + "</h2>" +
-      '<p class="city-information-type">Directory</p>' +
-      cityFactsList(facts) +
-    "</div>";
-  }
-
-  function cityFileInformation(file) {
-    if (!file) return "";
-    var facts = file.facts;
-    if (facts.kind !== "code") {
-      return '<div><h2>' + escape(file.path) + "</h2>" +
-        '<p class="city-information-type">Non-code file</p><dl>' +
-          "<dt>language</dt><dd>" + escape(file.lang) + "</dd>" +
-          "<dt>lines</dt><dd>" + formatNumber(file.lines) + "</dd>" +
-          "<dt>size</dt><dd>" + formatBytes(file.bytes) + "</dd>" +
-        "</dl></div>";
-    }
-    var callableList = facts.callable_ids.length
-      ? '<ul class="city-callables">' + facts.callable_ids.map(function (id) {
-        var node = nodeById[id];
-        if (!node) {
-          var symbol = symbolById[id];
-          return '<li><span title="This callable is outside the static map.">' +
-            escape(symbol ? symbol.name : id) + " (outside static map)</span></li>";
-        }
-        return '<li><button data-city-callable="' + escapeAttr(id) + '">' + escape(node.name) + "</button></li>";
-      }).join("") + "</ul>"
-      : '<p class="city-callables-empty">No callable source is available.</p>';
-    return '<div><h2>' + escape(file.path) + "</h2>" +
-      '<p class="city-information-type">' + (facts.is_test ? "Test file" : "Code file") + "</p>" +
-      cityFactsList(facts) +
-      '<h3>Callables</h3>' + callableList +
-    "</div>";
-  }
-
-  function cityFactsList(facts) {
-    return "<dl>" +
-      "<dt>code LOC</dt><dd>" + formatNumber(facts.code_loc) + "</dd>" +
-      "<dt>callables</dt><dd>" + formatNumber(facts.callable_count) + "</dd>" +
-      "<dt>classes</dt><dd>" + formatNumber(facts.class_count) + "</dd>" +
-      "<dt>warnings</dt><dd>" + formatNumber(facts.warning_count) + (facts.warning_types.length ? " (" + escape(facts.warning_types.join(", ")) + ")" : "") + "</dd>" +
-      "<dt>unresolved calls</dt><dd>" + formatNumber(facts.unresolved_calls) + "</dd>" +
-      "<dt>dead functions</dt><dd>" + formatNumber(facts.dead_function_count) + "</dd>" +
-      "<dt>clone groups</dt><dd>" + formatNumber(facts.clone_group_ids.length) + "</dd>" +
-      "<dt>load-bearing</dt><dd>" + formatNumber(facts.load_bearing_function_count) + "</dd>" +
-      (facts.large_function_loc ? "<dt>largest flagged function</dt><dd>" + formatNumber(facts.large_function_loc) + " LOC</dd>" : "") +
-      (facts.functionality_ids.length ? "<dt>accepted functionality</dt><dd>" + escape(facts.functionality_ids.join(", ")) + "</dd>" : "") +
-      (facts.layer_violation_ids.length ? "<dt>layer violations</dt><dd>" + formatNumber(facts.layer_violation_ids.length) + "</dd>" : "") +
-    "</dl>";
-  }
-
-  function cityMapItems(path) {
-    var directories = citymap.dirs.filter(function (directory) {
-      return cityParentPath(directory.path) === path;
-    });
-    var files = citymap.files.filter(function (file) { return file.dir === path; });
-    return directories.map(function (directory) { return { kind: "dir", value: directory }; })
-      .concat(files.map(function (file) { return { kind: "file", value: file }; }))
-      .sort(function (left, right) {
-        var a = left.value.rect, b = right.value.rect;
-        return a.z - b.z || a.x - b.x || left.value.path.localeCompare(right.value.path);
-      });
-  }
-
-  function cityMapDirectoryTile(item, parentRect) {
-    var directory = item.value;
-    var rect = cityLocalRect(directory.rect, parentRect);
-    var header = cityLocalRect(directory.header_rect, parentRect);
-    var label = cityMapLabel(directory.path);
-    var selected = state.mapSelection && state.mapSelection.kind === "dir" && state.mapSelection.path === directory.path;
-    var text = rect.w > 10 && header.h > 2
-      ? '<text class="city-map-tile-label city-map-dir-label" x="' + (header.x + 1.6) + '" y="' + (header.y + header.h / 2) + '" dominant-baseline="middle">' + escape(truncate(label, Math.max(3, Math.floor(rect.w / 3.3)))) + "</text>"
-      : "";
-    return '<g class="city-map-item city-map-dir risk-' + directory.facts.risk + (selected ? " selected" : "") + '" role="button" tabindex="0" data-city-directory="' + escapeAttr(directory.path) + '" aria-label="Open ' + escapeAttr(directory.path) + '">' +
-      '<title>' + escape(directory.path) + " · " + formatCount(directory.file_count, "file") + " · " + formatNumber(directory.facts.code_loc) + " code LOC</title>" +
-      '<rect class="city-map-dir-body" x="' + rect.x + '" y="' + rect.y + '" width="' + rect.w + '" height="' + rect.h + '"></rect>' +
-      '<rect class="city-map-dir-header" x="' + header.x + '" y="' + header.y + '" width="' + header.w + '" height="' + header.h + '"></rect>' + text + "</g>";
-  }
-
-  function cityMapFileTile(item, parentRect) {
-    var file = item.value;
-    var rect = cityLocalRect(file.rect, parentRect);
-    var label = cityMapLabel(file.path);
-    var selected = state.mapSelection && state.mapSelection.kind === "file" && state.mapSelection.path === file.path;
-    var text = rect.w > 10 && rect.h > 7
-      ? '<text class="city-map-tile-label city-map-file-label" x="' + (rect.x + 1.6) + '" y="' + (rect.y + rect.h / 2) + '" dominant-baseline="middle">' + escape(truncate(label, Math.max(3, Math.floor(rect.w / 3.3)))) + "</text>"
-      : "";
-    return '<g class="city-map-item city-map-file tone-' + cityFileTone(file) + (selected ? " selected" : "") + '" role="button" tabindex="0" data-city-kind="file" data-city-select="' + escapeAttr(file.path) + '" aria-label="Select ' + escapeAttr(file.path) + '">' +
-      '<title>' + escape(file.path) + " · " + formatNumber(file.lines) + " lines · " + formatBytes(file.bytes) + "</title>" +
-      '<rect x="' + rect.x + '" y="' + rect.y + '" width="' + rect.w + '" height="' + rect.h + '"></rect>' + text + "</g>";
-  }
-
-  function cityFileTone(file) {
-    var facts = file.facts;
-    if (facts.kind !== "code" || facts.is_test) return "slate";
-    if (facts.risk === "severe") return "red";
-    if (facts.risk === "elevated") return "amber";
-    return "stone";
-  }
-
-  function cityMapBreadcrumb(path) {
-    var parts = [{ label: "root", path: "" }];
-    if (path) {
-      var segments = path.split("/");
-      for (var i = 0; i < segments.length; i += 1) {
-        parts.push({ label: segments[i], path: segments.slice(0, i + 1).join("/") });
-      }
-    }
-    return '<nav class="city-map-breadcrumb" aria-label="Repository map path">' + parts.map(function (part, index) {
-      return '<button class="city-map-crumb' + (part.path === path ? " active" : "") + '" data-city-path="' + escapeAttr(part.path) + '">' + escape(part.label) + "</button>" +
-        (index < parts.length - 1 ? '<span aria-hidden="true">›</span>' : "");
-    }).join("") + "</nav>";
-  }
-
-  function cityLocalRect(rect, parent) {
-    return {
-      x: ((rect.x - parent.x) / parent.w) * 120,
-      y: ((rect.z - parent.z) / parent.d) * 120,
-      w: (rect.w / parent.w) * 120,
-      h: (rect.d / parent.d) * 120,
-    };
-  }
-
-  function cityParentPath(path) {
-    var slash = path.lastIndexOf("/");
-    return slash < 0 ? "" : path.slice(0, slash);
-  }
-
-  function cityMapLabel(path) {
-    var slash = path.lastIndexOf("/");
-    return slash < 0 ? path : path.slice(slash + 1);
-  }
-
-  function openCityPath(path) {
-    if (path !== "" && !cityDirByPath[path]) return;
-    recordNavigation();
-    state.cityPath = path;
-    state.mapSelection = path ? { kind: "dir", path: path } : null;
-    synchronizeGraphWithCityPath(path);
-    rerender();
-  }
-
-  function synchronizeGraphWithCityPath(path) {
-    var scope = cityGraphScope(path);
-    if (scope === state.scope) return;
-    clearGraphPromptState();
-    clearTraceState();
-    state.scope = scope;
-    state.mode = objectDominated(treeByPath[scope] || tree) ? "objects" : "functions";
-    state.focus = null;
-    state.graphSelection = null;
-    state.graphSelectionType = null;
-    state.detailSelection = null;
-    state.sourceRange = null;
-    state.objectFocus = null;
-    state.hovered = null;
-  }
-
-  function cityGraphScope(path) {
-    var modules = [];
-    citymap.files.forEach(function (file) {
-      if (path && file.dir !== path && file.dir.indexOf(path + "/") !== 0) return;
-      (file.facts.callable_ids || []).forEach(function (id) {
-        var node = nodeById[id];
-        if (node) modules.push(node.module);
-      });
-    });
-    if (!modules.length) return tree.path;
-
-    var shared = modules[0].split(".");
-    modules.slice(1).forEach(function (module) {
-      var parts = module.split(".");
-      var length = 0;
-      while (length < shared.length && shared[length] === parts[length]) length += 1;
-      shared = shared.slice(0, length);
-    });
-    while (shared.length && !treeByPath[shared.join(".")]) shared.pop();
-    return shared.join(".");
-  }
-
-  function selectCityItem(kind, path) {
-    recordNavigation();
-    state.mapSelection = { kind: kind, path: path };
-    rerender();
-  }
-
-  function selectCityCallable(id) {
-    if (!nodeById[id]) return;
-    recordNavigation();
-    selectFunction(id);
-  }
-
-  function formatCount(count, singular) {
-    return formatNumber(count) + " " + (count === 1 ? singular : singular + "s");
-  }
-
-  function formatNumber(value) {
-    return Number(value || 0).toLocaleString();
-  }
-
-  function formatBytes(value) {
-    if (value < 1024) return formatNumber(value) + " B";
-    if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
-    return (value / (1024 * 1024)).toFixed(1) + " MB";
   }
 
   function hideDetail() {
@@ -4365,19 +4464,23 @@
       });
     }
     if (graph.kind === "global") minY = Math.min(minY, graph.routeTop);
-    if ((graph.kind === "global" || graph.kind === "pipeline-overview") && Number.isFinite(graph.routeLeft)) {
+    if ((graph.kind === "global" || graph.kind === "pipeline-overview" || graph.kind === "function") && Number.isFinite(graph.routeLeft)) {
       minX = Math.min(minX, graph.routeLeft);
       maxX = Math.max(maxX, graph.routeRight);
+      if (Number.isFinite(graph.routeTop)) minY = Math.min(minY, graph.routeTop);
+      if (Number.isFinite(graph.routeBottom)) maxY = Math.max(maxY, graph.routeBottom);
     }
     var rect = canvas.getBoundingClientRect();
     var w = rect.width || 900, h = rect.height || 700;
     var toolbar = document.querySelector(".toolbar");
     var topInset = Math.max(MARGIN, (toolbar ? toolbar.getBoundingClientRect().height : 0) + 12);
+    var leftInset = MARGIN;
+    var availableWidth = Math.max(1, w - leftInset - MARGIN);
     var availableHeight = Math.max(1, h - topInset - MARGIN);
-    var scale = Math.min((w - 2 * MARGIN) / Math.max(1, maxX - minX), availableHeight / Math.max(1, maxY - minY), 1);
-    var globalScale = graph.kind === "global" || graph.kind === "pipeline-overview";
-    view.scale = Math.max(scale, globalScale ? 0.04 : 0.18);
-    view.x = (w - (maxX + minX) * view.scale) / 2;
+    var scale = Math.min(availableWidth / Math.max(1, maxX - minX), availableHeight / Math.max(1, maxY - minY), 1);
+    view.scale = Math.max(scale, 0.01);
+    var contentW = (maxX - minX) * view.scale;
+    view.x = leftInset + (availableWidth - contentW) / 2 - minX * view.scale;
     var contentH = (maxY - minY) * view.scale;
     view.y = contentH < availableHeight
       ? topInset + (availableHeight - contentH) / 2 - minY * view.scale
@@ -4455,7 +4558,7 @@
   }
 
   function zoomAt(px, py, factor) {
-    var next = Math.min(2.5, Math.max(0.04, view.scale * factor));
+    var next = Math.min(2.5, Math.max(0.01, view.scale * factor));
     view.x = px - (px - view.x) * (next / view.scale);
     view.y = py - (py - view.y) * (next / view.scale);
     view.scale = next;
@@ -4476,11 +4579,10 @@
   }
 
   function redraw(refit) {
-    var graph = currentGraph();
-    layout(graph);
+    var prepared = prepareGraph();
+    var graph = prepared.graph;
     if (refit) fitView(graph);
     draw(graph);
-    lastTopologyKey = graphTopologyKey(graph);
     syncZoomReadout();
   }
 

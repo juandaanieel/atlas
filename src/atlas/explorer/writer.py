@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -42,8 +43,10 @@ def _asset_version(path: Path) -> str:
 
 def _script_safe_json(snapshot: AnalysisSnapshot) -> str:
     """Escape HTML-significant characters before placing JSON in a script."""
+    document = snapshot.to_dict()
+    document.pop("citymap")
     return (
-        snapshot.to_json()
+        json.dumps(document, sort_keys=True)
         .replace("&", "\\u0026")
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")

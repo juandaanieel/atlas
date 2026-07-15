@@ -32,21 +32,15 @@
 
   function serializeHash(state) {
     var parts = ["workspace=" + encodeURIComponent(state.workspace)];
-    if (state.navigationSurface !== "city") parts.push("nav=" + state.navigationSurface);
     if (state.scope) parts.push("scope=" + encodeURIComponent(state.scope));
     if (state.workspace === "graph" || state.mode !== "functions") parts.push("mode=" + state.mode);
-    if (state.mode === "global" && state.globalView === "pipelines") parts.push("globalView=pipelines");
+    if (state.mode === "global") parts.push("globalView=" + state.globalView);
     if (state.graphSelection) {
       parts.push("graph=" + encodeURIComponent(state.graphSelection));
       parts.push("type=" + state.graphSelectionType);
     }
     if (state.traceStart) parts.push("traceStart=" + encodeURIComponent(state.traceStart));
     if (state.traceEnd) parts.push("traceEnd=" + encodeURIComponent(state.traceEnd));
-    if (state.cityPath) parts.push("city=" + encodeURIComponent(state.cityPath));
-    if (state.mapSelection) {
-      parts.push("map=" + encodeURIComponent(state.mapSelection.path));
-      parts.push("mapType=" + state.mapSelection.kind);
-    }
     if (state.objectFocus) parts.push("objectFocus=" + encodeURIComponent(state.objectFocus));
     if (state.detailSelection) {
       if (state.detailSelection.type === "function") {
