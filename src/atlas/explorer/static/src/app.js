@@ -153,6 +153,7 @@
     traceEnd: null,
     hovered: null,
     disabled: {},
+    soloPath: null,
     expanded: { "": true },    // tree paths that are open
     navigationCollapsed: true,
     useCaseSelections: {},
@@ -3997,6 +3998,14 @@
         focusTreeItem("data-toggle-graph-node", path);
       });
     });
+    treePanel.querySelectorAll("[data-solo-graph-node]").forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.stopPropagation();
+        var path = button.getAttribute("data-solo-graph-node");
+        soloGraphNode(path);
+        focusTreeItem("data-solo-graph-node", path);
+      });
+    });
     syncTreeSelection();
   }
 
@@ -4041,10 +4050,18 @@
     var label = graphState === "mixed" ? "MIX" : graphState === "on" ? "ON" : "OFF";
     var pressed = graphState === "mixed" ? "mixed" : String(graphState === "on");
     var nodeLabel = node.path || "all";
-    return '<button type="button" class="graph-toggle ' + graphState +
+    var unavailableLabel = "No analyzed functions in " + nodeLabel;
+    var toggle = '<button type="button" class="graph-toggle ' + graphState +
       '" data-toggle-graph-node="' + escapeAttr(node.path) + '" aria-pressed="' + pressed + '" aria-label="' +
-      escapeAttr(hasFunctions ? action + " " + nodeLabel : "No analyzed functions in " + nodeLabel) + '" title="' +
+      escapeAttr(hasFunctions ? action + " " + nodeLabel : unavailableLabel) + '" title="' +
       escapeAttr(hasFunctions ? action : "No analyzed functions") + '"' + (hasFunctions ? "" : " disabled") + ">" + label + "</button>";
+    var soloActive = state.soloPath === node.path;
+    var solo = '<button type="button" class="graph-solo' + (soloActive ? " active" : "") +
+      '" data-solo-graph-node="' + escapeAttr(node.path) + '" aria-pressed="' + soloActive + '" aria-label="' +
+      escapeAttr(hasFunctions ? "Show only " + nodeLabel + " in graph" : unavailableLabel) + '" title="' +
+      escapeAttr(hasFunctions ? "Show only this " + nodeKind : "No analyzed functions") + '"' +
+      (hasFunctions ? "" : " disabled") + ">SOLO</button>";
+    return '<span class="graph-toggle-actions">' + toggle + solo + "</span>";
   }
 
   function graphNodeState(node) {
@@ -4190,40 +4207,56 @@
     var functionIds = functionIdsByTreePath[path];
     if (!functionIds.length) return;
     clearGraphPromptState();
+    state.soloPath = null;
     var enable = graphNodeState(graphNode) === "off";
-    var graphFunctions = setOf(functionIds);
     functionIds.forEach(function (id) {
       if (enable) delete state.disabled[id];
       else state.disabled[id] = true;
     });
-    if (!enable && (graphFunctions[state.traceStart] || graphFunctions[state.traceEnd])) clearTraceState();
-    var selectedObject = state.graphSelectionType === "object" && objectById[state.graphSelection];
-    if (!enable && (
-      (state.graphSelectionType === "file" && pathIsWithin(state.graphSelection, graphNode.path)) ||
-      graphFunctions[state.graphSelection] ||
-      (selectedObject && pathIsWithin(selectedObject.module, graphNode.path))
-    )) {
+    clearInactiveGraphState();
+    rerender();
+  }
+
+  function soloGraphNode(path) {
+    var graphNode = treeByPath[path];
+    if (!graphNode) return;
+    var functionIds = functionIdsByTreePath[path];
+    if (!functionIds.length) return;
+    clearGraphPromptState();
+    var visibleFunctions = setOf(functionIds);
+    model.nodes.forEach(function (node) {
+      if (visibleFunctions[node.id]) delete state.disabled[node.id];
+      else state.disabled[node.id] = true;
+    });
+    state.soloPath = path;
+    clearInactiveGraphState();
+    rerender();
+  }
+
+  function graphTargetIsActive(type, id) {
+    if (type === "function") return !!nodeById[id] && !state.disabled[id];
+    if (type === "file") return !!treeByPath[id] && graphNodeState(treeByPath[id]) !== "off";
+    if (type === "object") {
+      var object = objectById[id];
+      return !!object && !!treeByPath[object.module] && graphNodeState(treeByPath[object.module]) !== "off";
+    }
+    return false;
+  }
+
+  function clearInactiveGraphState() {
+    if (state.disabled[state.traceStart] || state.disabled[state.traceEnd]) clearTraceState();
+    if (state.graphSelection && !graphTargetIsActive(state.graphSelectionType, state.graphSelection)) {
       state.graphSelection = null;
       state.graphSelectionType = null;
     }
-    var selectedDetailObject = state.detailSelection && state.detailSelection.type === "object" &&
-      objectById[state.detailSelection.id];
-    if (!enable && state.detailSelection && (
-      (state.detailSelection.type === "function" && graphFunctions[state.detailSelection.id]) ||
-      (selectedDetailObject && pathIsWithin(selectedDetailObject.module, graphNode.path))
-    )) {
+    if (state.detailSelection && !graphTargetIsActive(state.detailSelection.type, state.detailSelection.id)) {
       state.detailSelection = null;
       state.sourceRange = null;
       detailReturnFocus = null;
     }
-    if (!enable && graphFunctions[state.hovered]) state.hovered = null;
-    if (!enable && graphFunctions[state.focus]) state.focus = null;
-    if (!enable && state.lastFunctionClick && graphFunctions[state.lastFunctionClick.id]) state.lastFunctionClick = null;
-    rerender();
-  }
-
-  function pathIsWithin(path, parentPath) {
-    return !parentPath || path === parentPath || path.indexOf(parentPath + ".") === 0;
+    if (state.disabled[state.hovered]) state.hovered = null;
+    if (state.disabled[state.focus]) state.focus = null;
+    if (state.lastFunctionClick && state.disabled[state.lastFunctionClick.id]) state.lastFunctionClick = null;
   }
 
   function expandTo(path) {
