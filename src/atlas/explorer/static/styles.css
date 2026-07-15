@@ -1164,6 +1164,41 @@ button:active:not(:disabled) { transform: none; }
   flex: 0 0 auto;
 }
 
+.file-toggle {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  cursor: pointer;
+  flex: 0 0 36px;
+  font-size: 9px;
+  font-weight: 700;
+  height: 22px;
+  line-height: 20px;
+  min-height: 22px;
+  padding: 0 4px;
+  text-align: center;
+}
+
+.file-toggle.on {
+  background: rgba(63, 185, 80, 0.08);
+  border-color: #3fb950;
+  color: #3fb950;
+}
+
+.file-toggle.off:hover {
+  border-color: #8b949e;
+  color: #c9d1d9;
+}
+
+.file-toggle:disabled {
+  border-color: #21262d;
+  color: #484f58;
+  cursor: default;
+}
+
+.trow.file-off .tname { color: #6e7681; }
+.trow.file-off .tbadges { opacity: 0.45; }
+
 .sidebar {
   border: 1px solid #30363d;
   bottom: auto;
