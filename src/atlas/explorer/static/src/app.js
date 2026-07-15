@@ -2505,10 +2505,11 @@
         "CLASS / " + truncate(methodGroup.label, Math.max(10, Math.floor((methodGroup.width - 126) / 6.3)))
       );
       title.setAttribute("data-object-focus", methodGroup.id);
-      makeSvgButton(title, "Inspect class " + methodGroup.label, function (event) {
+      makeSvgButton(title, "Select class " + methodGroup.label + "; double click to inspect source", function (event) {
         event.stopPropagation();
-        selectObject(methodGroup.id);
+        selectObject(methodGroup.id, false);
       });
+      bindDoubleClick(title, function () { selectObject(methodGroup.id, true); });
       layer.appendChild(title);
       var countLabel = methodGroup.itemIds.length + (methodGroup.itemIds.length === 1 ? " METHOD" : " METHODS");
       var count = text(
@@ -2690,10 +2691,11 @@
       if (state.graphSelectionType === "function" && state.graphSelection === row.id) rowClass += " selected";
       var label = text(12, row.y, rowClass, truncate(row.name, card.chars));
       label.setAttribute("data-function-focus", row.id);
-      makeSvgButton(label, "Inspect function " + row.name, function (event) {
+      makeSvgButton(label, "Select function " + row.name + "; double click to inspect source", function (event) {
         event.stopPropagation();
         selectFunction(row.id);
       });
+      bindDoubleClick(label, function () { startTrace(row.id, true); });
       g.appendChild(label);
     });
 
@@ -2814,7 +2816,7 @@
     }
     g.appendChild(text(10, 18, "node-name", truncate(it.label, 24)));
     g.appendChild(text(10, 33, "node-meta", it.isPipelineHead ? "public pipeline head" : roleLabel(node)));
-    makeSvgButton(g, "Inspect function " + (node.qualified_name || node.name), function (event) {
+    makeSvgButton(g, "Select function " + (node.qualified_name || node.name) + "; double click to inspect source", function (event) {
       event.stopPropagation();
       if (event.shiftKey) {
         selectTraceEndpoint(node.id);
@@ -2826,6 +2828,7 @@
       }
       selectFunction(node.id);
     });
+    bindDoubleClick(g, function () { startTrace(node.id, true); });
     return g;
   }
 
@@ -2915,10 +2918,11 @@
     g.appendChild(r);
     var objectLabel = text(12, 18, "object-name", truncate(it.label, card.chars));
     objectLabel.setAttribute("data-object-focus", object.id);
-    makeSvgButton(objectLabel, "Inspect object " + object.name, function (event) {
+    makeSvgButton(objectLabel, "Select object " + object.name + "; double click to inspect source", function (event) {
       event.stopPropagation();
-      selectObject(object.id);
+      selectObject(object.id, false);
     });
+    bindDoubleClick(objectLabel, function () { selectObject(object.id, true); });
     g.appendChild(objectLabel);
     g.appendChild(text(12, 35, "object-doc", truncate(object.docstring_summary || "No docstring", card.chars + 4)));
     g.appendChild(line(0, 44, it.w, 44, "object-divider"));
@@ -2946,10 +2950,11 @@
         var methodLabel = row.text || node.name;
         var label = text(row.tick ? 12 : 24, row.y, rowClass, truncate(methodLabel, card.chars));
         label.setAttribute("data-function-focus", row.id);
-        makeSvgButton(label, "Inspect method " + node.name, function (event) {
+        makeSvgButton(label, "Select method " + node.name + "; double click to inspect source", function (event) {
           event.stopPropagation();
-          selectObjectMethod(object.id, row.id);
+          selectObjectMethod(object.id, row.id, false);
         });
+        bindDoubleClick(label, function () { selectObjectMethod(object.id, row.id, true); });
         g.appendChild(label);
       } else {
         var cls = row.kind === "more" ? "object-more" : row.collab ? "object-mini-label collab" : "object-mini-label";
@@ -2958,7 +2963,11 @@
     });
     drawStateStrip(g, object, it.w, h, card.chars);
 
-    g.addEventListener("click", function (ev) { ev.stopPropagation(); selectObject(object.id); });
+    g.addEventListener("click", function (event) {
+      event.stopPropagation();
+      selectObject(object.id, false);
+    });
+    bindDoubleClick(g, function () { selectObject(object.id, true); });
     return g;
   }
 
@@ -3089,12 +3098,12 @@
     var globalPipelinesButton = document.getElementById("globalPipelines");
     if (globalPipelinesButton) globalPipelinesButton.addEventListener("click", function () { setGlobalView("pipelines"); });
     document.getElementById("hint").textContent = graph.traceActive
-      ? "Trace highlighted · Shift-click a target · layout remains fixed"
+      ? "Trace highlighted · double-click source · Shift-click a target · layout remains fixed"
       : graph.kind === "global"
-        ? "Cross-file calls · click a file or function to highlight · drag and zoom are manual"
+        ? "Cross-file calls · click to highlight · double-click source · drag and zoom are manual"
         : graph.kind === "pipeline-overview"
-          ? "Public-headed pipelines · private helpers remain downstream or unattached · drag and zoom are manual"
-        : "Click a function to highlight calls · Shift-click sets a target · drag and zoom are manual";
+          ? "Public workflows · click to highlight · double-click source · layout remains fixed"
+        : "Click a function to highlight calls · double-click source · Shift-click sets a target";
   }
 
   function edgeLegend() {
@@ -3195,13 +3204,11 @@
     var location = call ? " at line " + call.line : "";
     path.setAttribute("data-edge-source", sourceId);
     path.setAttribute("data-edge-target", targetId);
-    makeSvgButton(path, "Inspect call from " + graphPromptFunctionName(sourceId) +
-      " to " + graphPromptFunctionName(targetId) + location, function (event) {
-      event.stopPropagation();
+    function selectTraceCall(showDetail) {
       state.graphSelection = sourceId;
       state.graphSelectionType = "function";
-      state.detailSelection = { type: "function", id: sourceId };
-      state.sourceRange = call ? {
+      state.detailSelection = showDetail ? { type: "function", id: sourceId } : null;
+      state.sourceRange = showDetail && call ? {
         symbolId: sourceId,
         anchorLine: call.line,
         startLine: call.line,
@@ -3211,7 +3218,13 @@
       redraw(false);
       renderDetail();
       syncTreeSelection();
+    }
+    makeSvgButton(path, "Select call from " + graphPromptFunctionName(sourceId) +
+      " to " + graphPromptFunctionName(targetId) + location + "; double click to inspect source", function (event) {
+      event.stopPropagation();
+      selectTraceCall(false);
     });
+    bindDoubleClick(path, function () { selectTraceCall(true); });
   }
 
   function graphPromptPipelineOrder(selectedIds, edges) {
@@ -4087,15 +4100,11 @@
   }
 
   function selectFunction(id) {
-    startTrace(id);
+    startTrace(id, false);
   }
 
-  function startTrace(id) {
+  function startTrace(id, showDetail) {
     if (!activeTraceFunction(id)) return;
-    if (state.traceStart === id && state.graphSelection === id && detailIsFunction(id)) {
-      clearGraphSelection();
-      return;
-    }
     var globalMode = state.mode === "global";
     var preferObjects = state.mode === "objects";
     var modulePath = moduleOf(id);
@@ -4111,7 +4120,8 @@
     state.objectFocus = null;
     state.graphSelection = id;
     state.graphSelectionType = "function";
-    state.detailSelection = { type: "function", id: id };
+    state.detailSelection = showDetail ? { type: "function", id: id } : null;
+    state.sourceRange = null;
     state.hovered = null;
     if (!globalMode) state.scope = modulePath;
     expandTo(modulePath);
@@ -4138,7 +4148,7 @@
   function selectTraceEndpoint(id) {
     if (!activeTraceFunction(id)) return;
     if (!state.traceStart) {
-      startTrace(id);
+      startTrace(id, false);
       return;
     }
     state.traceEnd = id;
@@ -4147,7 +4157,8 @@
     state.objectFocus = null;
     state.graphSelection = id;
     state.graphSelectionType = "function";
-    state.detailSelection = { type: "function", id: id };
+    state.detailSelection = null;
+    state.sourceRange = null;
     state.hovered = null;
     expandTo(moduleOf(id));
     rerender();
@@ -4159,7 +4170,8 @@
     state.traceStart = state.traceEnd;
     state.traceEnd = start;
     state.graphSelection = state.traceEnd;
-    state.detailSelection = { type: "function", id: state.traceEnd };
+    state.detailSelection = null;
+    state.sourceRange = null;
     rerender();
   }
 
@@ -4338,37 +4350,34 @@
     if (!window.matchMedia || window.matchMedia("(min-width: 1121px)").matches) setPanelWidth(panelWidth());
   }
 
-  function selectObject(id) {
+  function selectObject(id, showDetail) {
     if (!objectById[id]) return;
-    if (state.graphSelectionType === "object" && state.graphSelection === id &&
-        state.detailSelection && state.detailSelection.type === "object" && state.detailSelection.id === id) {
-      clearGraphSelection();
-      return;
-    }
     clearGraphPromptState();
     clearTraceState();
     state.graphSelection = id;
     state.workspace = "graph";
     state.graphSelectionType = "object";
-    state.detailSelection = { type: "object", id: id };
+    state.detailSelection = showDetail ? { type: "object", id: id } : null;
+    state.sourceRange = null;
     state.objectFocus = null;
     state.hovered = null;
     state.focus = null;
-    state.mode = "objects";
-    var module = objectById[id].module;
-    state.scope = module;
-    expandTo(module);
+    if (state.mode !== "global") {
+      state.mode = "objects";
+      state.scope = objectById[id].module;
+      expandTo(state.scope);
+    }
     rerender();
   }
 
-  function selectObjectMethod(objectId, methodId) {
+  function selectObjectMethod(objectId, methodId, showDetail) {
     var object = objectById[objectId];
     if (!object || objectMethodIds(object).indexOf(methodId) < 0 || !nodeById[methodId]) return;
     if (state.mode !== "global") {
       state.mode = "objects";
       state.scope = object.module;
     }
-    startTrace(methodId);
+    startTrace(methodId, showDetail);
   }
 
   // --- source inspector ---------------------------------------------------
@@ -5068,6 +5077,12 @@
     element.setAttribute("tabindex", "0");
     element.setAttribute("aria-label", label);
     bindNonNativeButton(element, activate);
+  }
+  function bindDoubleClick(element, activate) {
+    element.addEventListener("dblclick", function (event) {
+      event.stopPropagation();
+      activate(event);
+    });
   }
   function bindNonNativeButton(element, activate) {
     element.addEventListener("click", activate);
