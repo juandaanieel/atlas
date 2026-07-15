@@ -60,9 +60,36 @@
   var objects = payload.objects || [];
   var objectById = {};
   var objectsByModule = {};
+  var objectByMethodId = {};
+  var objectMethodVisibility = {};
+  var methodIdsByObject = {};
   objects.forEach(function (o) {
     objectById[o.id] = o;
     (objectsByModule[o.module] = objectsByModule[o.module] || []).push(o);
+    var constructorId = o.constructor && o.constructor.method_id;
+    if (constructorId) {
+      objectByMethodId[constructorId] = o;
+      objectMethodVisibility[constructorId] = "constructor";
+    }
+    (o.methods.public || []).forEach(function (id) {
+      objectByMethodId[id] = o;
+      objectMethodVisibility[id] = "public";
+    });
+    (o.methods.private || []).forEach(function (id) {
+      objectByMethodId[id] = o;
+      objectMethodVisibility[id] = "private";
+    });
+  });
+  // Some analyzers can map a method to its class before the object summary has
+  // classified its visibility. Keep those methods inside the class boundary.
+  payload.symbols.forEach(function (symbol) {
+    if (symbol.kind !== "function" || !symbol.class_id || !objectById[symbol.class_id]) return;
+    if (!objectByMethodId[symbol.id]) objectByMethodId[symbol.id] = objectById[symbol.class_id];
+    if (!objectMethodVisibility[symbol.id]) objectMethodVisibility[symbol.id] = symbol.is_private ? "private" : "public";
+  });
+  Object.keys(objectByMethodId).forEach(function (id) {
+    var object = objectByMethodId[id];
+    (methodIdsByObject[object.id] = methodIdsByObject[object.id] || []).push(id);
   });
   var architecture = payload.architecture || { functions: [], pipelines: [], use_cases: [], functionalities: [] };
   var architectureById = {};
@@ -186,12 +213,10 @@
       } else if (params.type === "object" && objectById[graphId]) {
         state.graphSelection = graphId;
         state.graphSelectionType = "object";
-        if (!params.detail) state.detailSelection = { type: "object", id: graphId };
       } else if (nodeById[graphId] && !state.disabled[graphId]) {
         state.graphSelection = graphId;
         state.graphSelectionType = "function";
         state.traceStart = graphId;
-        if (!params.source && !params.detail) state.detailSelection = { type: "function", id: graphId };
       }
     }
     if (params.objectFocus && objectById[params.objectFocus]) {
@@ -344,48 +369,94 @@
     var active = setOf(activeIds);
     var pipelineLayout = publicPipelineGroups(active);
     var groups = pipelineLayout.groups;
-    var ownerByFunction = pipelineLayout.ownerByFunction;
+    var workflows = pipelineLayout.workflows;
+    var workflowById = pipelineLayout.workflowById;
+    var primaryWorkflowByFunction = pipelineLayout.primaryWorkflowByFunction;
+    var workflowIdsByFunction = pipelineLayout.workflowIdsByFunction;
+    var visualByFunction = {};
+    activeIds.forEach(function (id) {
+      visualByFunction[id] = objectByMethodId[id] ? objectByMethodId[id].id : id;
+    });
     var groupById = {};
     groups.forEach(function (groupInfo) { groupById[groupInfo.id] = groupInfo; });
-    var items = activeIds.map(function (id) {
+    var items = activeIds.filter(function (id) { return !objectByMethodId[id]; }).map(function (id) {
       var item = fnItem(id);
-      if (item.node.kind === "method") item.label = id.slice(item.node.module.length + 1);
-      var groupInfo = groupById[ownerByFunction[id]];
+      var workflow = workflowById[primaryWorkflowByFunction[id]];
+      var groupInfo = workflow ? groupById[workflow.regionId] : null;
       item.objectId = groupInfo ? groupInfo.id : null;
-      item.pipelineIndex = groupInfo ? groupInfo.colorIndex : null;
-      item.isPipelineHead = !!groupInfo && groupInfo.anchorId === id;
+      item.pipelineIndex = workflow ? workflow.colorIndex : null;
+      item.isPipelineHead = !!workflow && workflow.root === id;
       return item;
     });
-    var edges = model.edges.filter(function (edgeInfo) {
-      return !state.disabled[edgeInfo.source] && !state.disabled[edgeInfo.target];
-    }).map(function (edgeInfo) {
+    objects.forEach(function (object) {
+      var activeMethods = objectMethodIds(object).filter(function (id) { return active[id]; });
+      if (!activeMethods.length) return;
+      var item = objectItem(object, true);
+      var objectWorkflows = workflows.filter(function (workflow) { return workflow.objectId === object.id; });
+      var groupInfo = objectWorkflows.length ? groupById[objectWorkflows[0].regionId] : null;
+      item.objectId = groupInfo ? groupInfo.id : null;
+      item.pipelineIndex = objectWorkflows.length ? objectWorkflows[0].colorIndex : null;
+      item.isPipelineHead = objectWorkflows.length > 0;
+      item.activeFunctionIds = setOf(activeMethods);
+      item.card = objectCardLayout(object, { active: active, allMethods: true });
+      item.methodPathIndex = {};
+      item.methodWorkflowIds = {};
+      activeMethods.forEach(function (id) {
+        var methodWorkflow = workflowById[primaryWorkflowByFunction[id]];
+        if (methodWorkflow) item.methodPathIndex[id] = methodWorkflow.colorIndex;
+        item.methodWorkflowIds[id] = (workflowIdsByFunction[id] || []).slice();
+      });
+      items.push(item);
+    });
+
+    var edges = [];
+    model.edges.forEach(function (edgeInfo) {
+      if (state.disabled[edgeInfo.source] || state.disabled[edgeInfo.target]) return;
       var key = edgeInfo.source + ">" + edgeInfo.target;
-      var sourceGroup = groupById[ownerByFunction[edgeInfo.source]];
-      var targetGroup = groupById[ownerByFunction[edgeInfo.target]];
-      return {
-        source: edgeInfo.source,
-        target: edgeInfo.target,
-        pathIndex: sourceGroup
-          ? sourceGroup.colorIndex
-          : targetGroup
-            ? targetGroup.colorIndex
-            : callPathIndexByEdge[key],
-        pathId: callPathIdByEdge[key],
+      var source = visualByFunction[edgeInfo.source];
+      var target = visualByFunction[edgeInfo.target];
+      if (!source || !target || source === target) return;
+      var memberships = pipelineLayout.workflowIdsByEdge[key] || [];
+      var sourceWorkflowId = primaryWorkflowByFunction[edgeInfo.source];
+      var targetWorkflowId = primaryWorkflowByFunction[edgeInfo.target];
+      var workflowId = memberships.indexOf(sourceWorkflowId) >= 0
+        ? sourceWorkflowId
+        : memberships.indexOf(targetWorkflowId) >= 0
+          ? targetWorkflowId
+          : memberships[0];
+      var workflow = workflowById[workflowId];
+      edges.push({
+        source: source,
+        target: target,
+        sourceFunction: edgeInfo.source,
+        targetFunction: edgeInfo.target,
+        originalKey: key,
+        workflowId: workflowId || null,
+        workflowIds: memberships.slice(),
+        pathIndex: workflow ? workflow.colorIndex : callPathIndexByEdge[key],
+        pathId: workflow ? workflow.order : callPathIdByEdge[key],
         weight: 1,
-      };
-    }).sort(compareRouteEdges);
+      });
+    });
+    edges.sort(compareRouteEdges);
     return {
       items: items,
       edges: edges,
       groups: groups,
-      freeItemIds: activeIds.filter(function (id) { return !ownerByFunction[id]; }),
+      freeItemIds: pipelineLayout.freeItemIds,
+      workflows: workflows,
+      workflowById: workflowById,
+      primaryWorkflowByFunction: primaryWorkflowByFunction,
+      workflowIdsByFunction: workflowIdsByFunction,
+      visualByFunction: visualByFunction,
       kind: "pipeline-overview",
     };
   }
 
-  // Public roots compete for functions by shortest directed distance. This
-  // keeps every function in one static compartment, preserves shared calls as
-  // cross-pipeline edges, and prevents private helpers from becoming heads.
+  // A workflow describes call-path membership; a region describes physical
+  // ownership. Public class methods each own a workflow, but their workflows
+  // share one class region and one object card. This avoids duplicating an
+  // object while keeping its public entry points independently selectable.
   function publicPipelineGroups(active) {
     var activeOutgoing = {};
     Object.keys(active).forEach(function (id) { activeOutgoing[id] = []; });
@@ -398,62 +469,186 @@
     var seenRoots = {};
     var records = (architecture.pipelines || []).filter(function (pipeline) {
       var root = nodeById[pipeline.root];
-      if (!active[pipeline.root] || !root || root.is_private || seenRoots[pipeline.root]) return false;
+      if (!active[pipeline.root] || !root || root.kind === "method" || root.is_private || seenRoots[pipeline.root]) return false;
       seenRoots[pipeline.root] = true;
       return true;
-    }).map(function (pipeline, index) {
+    }).map(function (pipeline) {
       return {
-        id: "public-pipeline-" + index,
         root: pipeline.root,
+        kind: "function",
+        objectId: null,
         label: pipelineRootLabel(pipeline.root),
-        colorIndex: index % PATH_COLORS.length,
-        order: index,
       };
     });
-
-    var rootGroupByFunction = {};
-    var rankByGroup = {};
-    var ownerByFunction = {};
-    var distanceByFunction = {};
-    var queue = [];
-    records.forEach(function (record) {
-      rootGroupByFunction[record.root] = record.id;
-      rankByGroup[record.id] = record.order;
-      ownerByFunction[record.root] = record.id;
-      distanceByFunction[record.root] = 0;
-      queue.push(record.root);
-    });
-    for (var head = 0; head < queue.length; head += 1) {
-      var source = queue[head];
-      var sourceOwner = ownerByFunction[source];
-      (activeOutgoing[source] || []).forEach(function (target) {
-        if (rootGroupByFunction[target]) return;
-        var distance = distanceByFunction[source] + 1;
-        var targetOwner = ownerByFunction[target];
-        var isCloser = distanceByFunction[target] === undefined || distance < distanceByFunction[target];
-        var winsTie = distance === distanceByFunction[target] &&
-          rankByGroup[sourceOwner] < rankByGroup[targetOwner];
-        if (!isCloser && !winsTie) return;
-        ownerByFunction[target] = sourceOwner;
-        distanceByFunction[target] = distance;
-        queue.push(target);
+    var classRegionByObject = {};
+    objects.slice().sort(function (left, right) {
+      return left.module.localeCompare(right.module) || left.name.localeCompare(right.name);
+    }).forEach(function (object, objectIndex) {
+      classRegionByObject[object.id] = "class-workflows-" + objectIndex;
+      (methodIdsByObject[object.id] || []).filter(function (id) {
+        return active[id] && objectMethodVisibility[id] === "public";
+      }).sort(function (left, right) {
+        var leftNode = nodeById[left], rightNode = nodeById[right];
+        return leftNode.line_start - rightNode.line_start || left.localeCompare(right);
+      }).forEach(function (id) {
+        if (seenRoots[id]) return;
+        seenRoots[id] = true;
+        records.push({
+          root: id,
+          kind: "class",
+          objectId: object.id,
+          label: object.name + "." + nodeById[id].name,
+        });
       });
-    }
+    });
 
-    var groups = records.map(function (record) {
-      return {
-        id: record.id,
-        label: record.label,
-        itemIds: Object.keys(ownerByFunction).filter(function (id) {
-          return ownerByFunction[id] === record.id;
-        }).sort(),
-        anchorId: record.root,
-        rootIds: [record.root],
+    records.forEach(function (record, index) {
+      record.id = "workflow-" + index;
+      record.order = index;
+      record.colorIndex = index % PATH_COLORS.length;
+      record.regionId = record.kind === "class" ? classRegionByObject[record.objectId] : "function-workflow-" + index;
+      record.functionSet = {};
+      record.edgeKeys = {};
+      record.distanceByFunction = {};
+      record.functionSet[record.root] = true;
+      record.distanceByFunction[record.root] = 0;
+      var queued = {};
+      var queue = [record.root];
+      queued[record.root] = true;
+      for (var head = 0; head < queue.length; head += 1) {
+        var source = queue[head];
+        (activeOutgoing[source] || []).forEach(function (target) {
+          var decision = workflowTraversalDecision(record, target);
+          if (!decision.include) return;
+          record.edgeKeys[source + ">" + target] = true;
+          record.functionSet[target] = true;
+          var distance = record.distanceByFunction[source] + 1;
+          if (record.distanceByFunction[target] === undefined || distance < record.distanceByFunction[target]) {
+            record.distanceByFunction[target] = distance;
+          }
+          if (decision.continue && !queued[target]) {
+            queued[target] = true;
+            queue.push(target);
+          }
+        });
+      }
+      record.functionIds = Object.keys(record.functionSet).sort();
+      record.edgeKeyList = Object.keys(record.edgeKeys).sort();
+    });
+
+    var workflowById = {};
+    var workflowIdsByFunction = {};
+    var workflowIdsByEdge = {};
+    records.forEach(function (record) {
+      workflowById[record.id] = record;
+      record.functionIds.forEach(function (id) {
+        (workflowIdsByFunction[id] = workflowIdsByFunction[id] || []).push(record.id);
+      });
+      record.edgeKeyList.forEach(function (key) {
+        (workflowIdsByEdge[key] = workflowIdsByEdge[key] || []).push(record.id);
+      });
+    });
+
+    var primaryWorkflowByFunction = {};
+    Object.keys(workflowIdsByFunction).forEach(function (id) {
+      var candidates = workflowIdsByFunction[id].map(function (workflowId) { return workflowById[workflowId]; });
+      candidates.sort(function (left, right) {
+        var leftIsRoot = left.root === id ? 0 : 1;
+        var rightIsRoot = right.root === id ? 0 : 1;
+        return leftIsRoot - rightIsRoot ||
+          left.distanceByFunction[id] - right.distanceByFunction[id] ||
+          left.order - right.order;
+      });
+      primaryWorkflowByFunction[id] = candidates[0].id;
+    });
+
+    var groupById = {};
+    records.forEach(function (record) {
+      if (groupById[record.regionId]) return;
+      if (record.kind === "function") {
+        groupById[record.regionId] = {
+          id: record.regionId,
+          kind: "function",
+          label: record.label,
+          itemIds: [],
+          anchorId: record.root,
+          rootIds: [record.root],
+          colorIndex: record.colorIndex,
+          pipelineCount: 1,
+        };
+        return;
+      }
+      var object = objectById[record.objectId];
+      groupById[record.regionId] = {
+        id: record.regionId,
+        kind: "class",
+        objectId: record.objectId,
+        label: object.module.split(".").slice(-1)[0] + "." + object.name,
+        itemIds: [record.objectId],
+        anchorId: record.objectId,
+        rootIds: [record.objectId],
         colorIndex: record.colorIndex,
-        pipelineCount: 1,
+        pipelineCount: 0,
       };
     });
-    return { groups: groups, ownerByFunction: ownerByFunction };
+    records.forEach(function (record) {
+      if (record.kind === "class") groupById[record.regionId].pipelineCount += 1;
+    });
+
+    var freeItemIds = [];
+    Object.keys(active).sort().forEach(function (id) {
+      if (objectByMethodId[id]) return;
+      var workflow = workflowById[primaryWorkflowByFunction[id]];
+      if (!workflow) {
+        freeItemIds.push(id);
+        return;
+      }
+      groupById[workflow.regionId].itemIds.push(id);
+    });
+    objects.forEach(function (object) {
+      var hasActiveMethods = objectMethodIds(object).some(function (id) { return active[id]; });
+      if (hasActiveMethods && !groupById[classRegionByObject[object.id]]) freeItemIds.push(object.id);
+    });
+    var groups = Object.keys(groupById).map(function (id) { return groupById[id]; }).sort(function (left, right) {
+      var leftWorkflow = records.filter(function (record) { return record.regionId === left.id; })[0];
+      var rightWorkflow = records.filter(function (record) { return record.regionId === right.id; })[0];
+      return leftWorkflow.order - rightWorkflow.order;
+    });
+    groups.forEach(function (groupInfo) {
+      groupInfo.itemIds = groupInfo.itemIds.filter(function (id, index, ids) { return ids.indexOf(id) === index; });
+    });
+    return {
+      groups: groups,
+      workflows: records,
+      workflowById: workflowById,
+      workflowIdsByFunction: workflowIdsByFunction,
+      workflowIdsByEdge: workflowIdsByEdge,
+      primaryWorkflowByFunction: primaryWorkflowByFunction,
+      freeItemIds: freeItemIds,
+    };
+  }
+
+  function workflowTraversalDecision(workflow, targetId) {
+    var object = objectByMethodId[targetId];
+    if (!object) return { include: true, continue: true };
+    var visibility = objectMethodVisibility[targetId] || "public";
+    if (workflow.kind === "function") {
+      return visibility === "public"
+        ? { include: true, continue: false }
+        : { include: false, continue: false };
+    }
+    if (object.id !== workflow.objectId) {
+      return visibility === "public"
+        ? { include: true, continue: false }
+        : { include: false, continue: false };
+    }
+    if (visibility === "public" && targetId !== workflow.root) {
+      return {
+        include: true,
+        continue: false,
+      };
+    }
+    return { include: true, continue: true };
   }
 
   function pipelineRootLabel(rootId) {
@@ -613,11 +808,7 @@
   }
 
   function objectMethodIds(object) {
-    var constructorId = object.constructor && object.constructor.method_id;
-    var ids = [];
-    if (constructorId) ids.push(constructorId);
-    ids = ids.concat((object.methods && object.methods.public) || []);
-    ids = ids.concat((object.methods && object.methods.private) || []);
+    var ids = (methodIdsByObject[object.id] || []).slice();
     var seen = {};
     return ids.filter(function (id) {
       if (seen[id] || !nodeById[id]) return false;
@@ -719,6 +910,7 @@
   // route remains unmistakable.
   function applyTrace(graph, startId, endId) {
     if (graph.kind === "global") return applyGlobalTrace(graph, startId, endId);
+    if (graph.kind === "pipeline-overview") return applyPipelineTrace(graph, startId, endId);
     if (graph.kind !== "function" && graph.kind !== "object-overview" && graph.kind !== "pipeline-overview") return graph;
     var route = endId
       ? core.shortestDirectedPath(model.edges, startId, endId, state.disabled)
@@ -757,6 +949,68 @@
     graph.traceActive = true;
     graph.traceStart = startId;
     graph.traceEnd = endId;
+    graph.route = route;
+    graph.noRoute = !!endId && !route;
+    return graph;
+  }
+
+  function applyPipelineTrace(graph, startId, endId) {
+    var route = endId
+      ? core.shortestDirectedPath(model.edges, startId, endId, state.disabled)
+      : null;
+    var workflow = !endId ? graph.workflowById[graph.primaryWorkflowByFunction[startId]] : null;
+    var tracedIds = workflow
+      ? workflow.functionIds.slice()
+      : endId
+        ? route || [startId, endId]
+        : [startId]
+          .concat((inAdj[startId] || []).filter(activeTraceFunction))
+          .concat((outAdj[startId] || []).filter(activeTraceFunction));
+    tracedIds = tracedIds.filter(function (id, index) { return tracedIds.indexOf(id) === index; });
+    var traced = setOf(tracedIds);
+    var traceEdges = workflow ? workflow.edgeKeys : {};
+    if (!workflow && route) {
+      for (var index = 0; index < route.length - 1; index += 1) {
+        traceEdges[route[index] + ">" + route[index + 1]] = true;
+      }
+    } else if (!workflow && !endId) {
+      (inAdj[startId] || []).forEach(function (source) { traceEdges[source + ">" + startId] = true; });
+      (outAdj[startId] || []).forEach(function (target) { traceEdges[startId + ">" + target] = true; });
+    }
+
+    graph.edges = graph.edges.map(function (edgeInfo) {
+      var copy = Object.assign({}, edgeInfo);
+      copy.inTrace = workflow
+        ? copy.workflowIds.indexOf(workflow.id) >= 0
+        : !!traceEdges[copy.originalKey || copy.source + ">" + copy.target];
+      if (workflow && copy.inTrace) copy.pathIndex = workflow.colorIndex;
+      return copy;
+    });
+    var tracedVisuals = {};
+    tracedIds.forEach(function (id) {
+      var visualId = graph.visualByFunction[id];
+      if (visualId) tracedVisuals[visualId] = true;
+    });
+    graph.items.forEach(function (item) {
+      var matchingFunctions = item.kind === "object"
+        ? objectMethodIds(item.node).filter(function (id) { return traced[id]; })
+        : traced[item.id] ? [item.id] : [];
+      if (!matchingFunctions.length) return;
+      if (item.kind === "object") item.traceFunctionIds = setOf(matchingFunctions);
+      item.traceRole = graph.visualByFunction[startId] === item.id ? "start" : "route";
+      item.traceOrder = route ? route.reduce(function (first, id, index) {
+        return first >= 0 || graph.visualByFunction[id] !== item.id ? first : index;
+      }, -1) : null;
+      item.activeWorkflowId = workflow ? workflow.id : null;
+      item.activePathIndex = workflow ? workflow.colorIndex : null;
+    });
+    graph.center = graph.visualByFunction[startId] || startId;
+    graph.traceActive = true;
+    graph.traceStart = startId;
+    graph.traceEnd = endId;
+    graph.traceVisualIds = tracedVisuals;
+    graph.activeWorkflowId = workflow ? workflow.id : null;
+    graph.activePathIndex = workflow ? workflow.colorIndex : null;
     graph.route = route;
     graph.noRoute = !!endId && !route;
     return graph;
@@ -1087,6 +1341,22 @@
   // Compact grids need routes that consider every segment, not only a single
   // vertical lane. Candidate paths stay deterministic and prefer short,
   // obstacle-free corridors with minimal overlap between different colours.
+  function obstacleRouteAnchor(item, functionId, other, outgoing, offset) {
+    if (item.kind === "object" && functionId && objectCard(item).rowY[functionId] !== undefined) {
+      var side = other.cx >= item.cx ? 1 : -1;
+      return {
+        x: item.cx + side * item.w / 2,
+        y: item.cy - item.h / 2 + objectCard(item).rowY[functionId] + (offset || 0),
+        side: side,
+      };
+    }
+    return {
+      x: item.cx + (offset || 0),
+      y: item.cy + (outgoing ? item.h / 2 : -item.h / 2),
+      side: 0,
+    };
+  }
+
   function assignObstacleRoutes(graph, byId, minX, maxX) {
     var nodeObstacles = graph.items.map(function (item) {
       return {
@@ -1131,13 +1401,15 @@
     graph.edges.slice().sort(compareRouteEdges).forEach(function (edgeInfo, edgeIndex) {
       var source = byId[edgeInfo.source], target = byId[edgeInfo.target];
       if (!source || !target) return;
-      var x1 = source.cx + (edgeInfo.sourcePortOffset || 0);
-      var y1 = source.cy + source.h / 2;
-      var x2 = target.cx + (edgeInfo.targetPortOffset || 0);
-      var y2 = target.cy - target.h / 2;
-      var sourceExit = y1 + 20;
-      var targetEntry = y2 - 20;
-      var desired = (x1 + x2) / 2;
+      var sourceAnchor = obstacleRouteAnchor(source, edgeInfo.sourceFunction, target, true, edgeInfo.sourcePortOffset);
+      var targetAnchor = obstacleRouteAnchor(target, edgeInfo.targetFunction, source, false, edgeInfo.targetPortOffset);
+      var sourceExit = sourceAnchor.side
+        ? { x: sourceAnchor.x + sourceAnchor.side * 20, y: sourceAnchor.y }
+        : { x: sourceAnchor.x, y: sourceAnchor.y + 20 };
+      var targetEntry = targetAnchor.side
+        ? { x: targetAnchor.x + targetAnchor.side * 20, y: targetAnchor.y }
+        : { x: targetAnchor.x, y: targetAnchor.y - 20 };
+      var desired = (sourceExit.x + targetEntry.x) / 2;
       var candidateSet = {};
       function addCandidate(x) { candidateSet[String(Math.round(x))] = Math.round(x); }
       for (var offset = -60; offset <= 60; offset += 6) addCandidate(desired + offset);
@@ -1152,7 +1424,7 @@
       var candidates = Object.keys(candidateSet).map(function (key) { return candidateSet[key]; }).sort(function (left, right) {
         return Math.abs(left - desired) - Math.abs(right - desired) || left - right;
       });
-      var reversed = y2 <= y1;
+      var reversed = targetAnchor.y <= sourceAnchor.y;
       if (reversed) {
         var sideLeft = Math.min(source.cx - source.w / 2, target.cx - target.w / 2) - 10;
         var sideRight = Math.max(source.cx + source.w / 2, target.cx + target.w / 2) + 10;
@@ -1181,15 +1453,15 @@
       }
       candidates.forEach(function (candidate) {
         considerRoute([
-          { x: x1, y: y1 },
-          { x: x1, y: sourceExit },
-          { x: candidate, y: sourceExit },
-          { x: candidate, y: targetEntry },
-          { x: x2, y: targetEntry },
-          { x: x2, y: y2 },
+          sourceAnchor,
+          sourceExit,
+          { x: candidate, y: sourceExit.y },
+          { x: candidate, y: targetEntry.y },
+          targetEntry,
+          targetAnchor,
         ], candidate < minX || candidate > maxX);
       });
-      var desiredY = (y1 + y2) / 2;
+      var desiredY = (sourceExit.y + targetEntry.y) / 2;
       var yCandidateSet = {};
       function addYCandidate(y) { yCandidateSet[String(Math.round(y))] = Math.round(y); }
       for (var yOffset = -60; yOffset <= 60; yOffset += 6) addYCandidate(desiredY + yOffset);
@@ -1204,10 +1476,12 @@
           return Math.abs(top - desiredY) - Math.abs(bottom - desiredY) || top - bottom;
         }).forEach(function (candidate) {
           considerRoute([
-            { x: x1, y: y1 },
-            { x: x1, y: candidate },
-            { x: x2, y: candidate },
-            { x: x2, y: y2 },
+            sourceAnchor,
+            sourceExit,
+            { x: sourceExit.x, y: candidate },
+            { x: targetEntry.x, y: candidate },
+            targetEntry,
+            targetAnchor,
           ], candidate < minY || candidate > maxY);
         });
       }
@@ -1227,14 +1501,14 @@
         targetSides.forEach(function (targetSide) {
           [minY - 30 - edgeIndex % 7 * 6, maxY + 30 + edgeIndex % 7 * 6].forEach(function (outerY) {
             considerRoute([
-              { x: x1, y: y1 },
-              { x: x1, y: sourceExit },
-              { x: sourceSide, y: sourceExit },
+              sourceAnchor,
+              sourceExit,
+              { x: sourceSide, y: sourceExit.y },
               { x: sourceSide, y: outerY },
               { x: targetSide, y: outerY },
-              { x: targetSide, y: targetEntry },
-              { x: x2, y: targetEntry },
-              { x: x2, y: y2 },
+              { x: targetSide, y: targetEntry.y },
+              targetEntry,
+              targetAnchor,
             ], true);
           });
         });
@@ -1752,6 +2026,7 @@
         for (var start = 0; start < row.length; start += innerColumns) {
           var chunk = row.slice(start, start + innerColumns);
           var contentWidth = chunk.reduce(function (sum, item) { return sum + item.w; }, 0) + (chunk.length - 1) * 22;
+          var chunkHeight = chunk.reduce(function (height, item) { return Math.max(height, item.h); }, NODE_H);
           var localX = -contentWidth / 2;
           chunk.forEach(function (item) {
             item.localX = localX + item.w / 2;
@@ -1759,7 +2034,7 @@
             item.layer = layerInfo.index;
             localX += item.w + 22;
           });
-          localY += NODE_H + 30;
+          localY += chunkHeight + 30;
         }
       });
       var usedWidth = Math.max.apply(null, groupItems.map(function (item) {
@@ -1826,6 +2101,7 @@
     for (var freeStart = 0; freeStart < freeItems.length; freeStart += freeColumns) {
       var freeRow = freeItems.slice(freeStart, freeStart + freeColumns);
       var freeWidth = freeRow.reduce(function (sum, item) { return sum + item.w; }, 0) + (freeRow.length - 1) * 28;
+      var freeHeight = freeRow.reduce(function (height, item) { return Math.max(height, item.h); }, NODE_H);
       var freeX = -freeWidth / 2;
       freeRow.forEach(function (item) {
         item.cx = freeX + item.w / 2;
@@ -1833,7 +2109,7 @@
         item.layer = Math.floor(freeStart / freeColumns);
         freeX += item.w + 28;
       });
-      freeY += NODE_H + 34;
+      freeY += freeHeight + 34;
     }
     graph.freeBottom = freeItems.length ? freeY - 34 : graph.freeTop;
   }
@@ -2102,7 +2378,7 @@
   }
 
   function synchronizeTracePresentation(target, source) {
-    ["center", "traceActive", "traceStart", "traceEnd", "route", "noRoute"].forEach(function (property) {
+    ["center", "traceActive", "traceStart", "traceEnd", "traceVisualIds", "activeWorkflowId", "activePathIndex", "route", "noRoute"].forEach(function (property) {
       if (source[property] === undefined) delete target[property];
       else target[property] = source[property];
     });
@@ -2110,7 +2386,7 @@
     source.items.forEach(function (item) { sourceItems[item.id] = item; });
     target.items.forEach(function (item) {
       var sourceItem = sourceItems[item.id] || {};
-      ["traceOrder", "traceRole", "traceFile"].forEach(function (property) {
+      ["traceOrder", "traceRole", "traceFile", "traceFunctionIds", "activeWorkflowId", "activePathIndex"].forEach(function (property) {
         if (sourceItem[property] === undefined) delete item[property];
         else item[property] = sourceItem[property];
       });
@@ -2123,8 +2399,10 @@
     });
     target.edges.forEach(function (edgeInfo, index) {
       var sourceEdge = source.edges[index] || {};
-      if (sourceEdge.inTrace === undefined) delete edgeInfo.inTrace;
-      else edgeInfo.inTrace = sourceEdge.inTrace;
+      ["inTrace", "pathIndex"].forEach(function (property) {
+        if (sourceEdge[property] === undefined) delete edgeInfo[property];
+        else edgeInfo[property] = sourceEdge[property];
+      });
     });
   }
 
@@ -2157,9 +2435,9 @@
       return;
     }
 
-    // Selection is expressed with rings and path weight. The rest of the
-    // system stays fully legible instead of fading into the background.
-    var lit = null;
+    // Pipeline selection is an emphasis layer only: geometry remains fixed,
+    // while nodes and paths outside the selected workflow recede.
+    var lit = graph.traceActive && graph.traceVisualIds ? graph.traceVisualIds : null;
     var center = graph.center || null;
     var groupLayer = el("g"), edgeLayer = el("g"), nodeLayer = el("g");
     root.appendChild(groupLayer); root.appendChild(edgeLayer); root.appendChild(nodeLayer);
@@ -2240,24 +2518,33 @@
   }
 
   function drawPipelineOverviewGroups(layer, graph) {
+    var activeWorkflow = graph.activeWorkflowId && graph.workflowById[graph.activeWorkflowId];
     graph.groups.forEach(function (pipelineGroup, index) {
-      var colorClass = " path-" + pipelineGroup.colorIndex;
-      var background = rect(pipelineGroup.width, pipelineGroup.height, "pipeline-compartment-box" + colorClass);
+      var pathIndex = activeWorkflow && activeWorkflow.regionId === pipelineGroup.id
+        ? activeWorkflow.colorIndex
+        : pipelineGroup.colorIndex;
+      var colorClass = " path-" + pathIndex;
+      var contextClass = activeWorkflow && activeWorkflow.regionId !== pipelineGroup.id ? " workflow-context-region" : "";
+      var typeClass = pipelineGroup.kind === "class" ? " class-workflow-compartment" : " function-workflow-compartment";
+      var background = rect(pipelineGroup.width, pipelineGroup.height, "pipeline-compartment-box" + colorClass + typeClass + contextClass);
       background.setAttribute("x", pipelineGroup.left);
       background.setAttribute("y", pipelineGroup.top);
       layer.appendChild(background);
       layer.appendChild(text(
         pipelineGroup.left + 14,
         pipelineGroup.headerY,
-        "pipeline-compartment-title" + colorClass,
-        "PUBLIC PIPELINE " + String(index + 1).padStart(2, "0") + " / " +
+        "pipeline-compartment-title" + colorClass + contextClass,
+        (pipelineGroup.kind === "class" ? "CLASS WORKFLOWS " : "FUNCTION WORKFLOW ") +
+          String(index + 1).padStart(2, "0") + " / " +
           truncate(pipelineGroup.label, Math.max(18, Math.floor((pipelineGroup.width - 190) / 6.3)))
       ));
       var count = text(
         pipelineGroup.left + pipelineGroup.width - 14,
         pipelineGroup.headerY,
-        "pipeline-compartment-count",
-        pipelineGroup.itemIds.length + " FUNCTIONS"
+        "pipeline-compartment-count" + contextClass,
+        pipelineGroup.kind === "class"
+          ? pipelineGroup.pipelineCount + " PUBLIC PATHS · " + pipelineGroup.itemIds.length + " NODES"
+          : pipelineGroup.itemIds.length + " FUNCTIONS"
       );
       count.setAttribute("text-anchor", "end");
       layer.appendChild(count);
@@ -2503,7 +2790,8 @@
     var node = it.node;
     var h = it.h || NODE_H;
     var traceClass = it.traceRole ? " trace-node trace-" + it.traceRole : "";
-    var pipelineClass = it.isPipelineHead ? " pipeline-head path-" + it.pipelineIndex : "";
+    var pipelineIndex = it.activePathIndex === null || it.activePathIndex === undefined ? it.pipelineIndex : it.activePathIndex;
+    var pipelineClass = it.isPipelineHead ? " pipeline-head path-" + pipelineIndex : "";
     var g = group("node " + statusClass(node) + traceClass + pipelineClass + (it.isConstructor ? " method-constructor" : "") + (on ? "" : " muted") + (it.id === center ? " center" : "") + (state.hovered === it.id ? " hover-link" : ""), it.cx - it.w / 2, it.cy - h / 2);
     g.setAttribute("data-function-focus", node.id);
     var r = rect(it.w, h, "");
@@ -2532,19 +2820,31 @@
 
   // One measured layout shared by the renderer and the sizing helpers, so
   // drawing and node dimensions can never drift apart.
-  function objectCardLayout(object) {
+  function objectCardLayout(object, options) {
+    options = options || {};
     var LINE = 16;
     var rows = [];
+    var rowY = {};
     var y = 60;
-    function push(row) { row.y = y; rows.push(row); y += LINE; }
+    function push(row) {
+      row.y = y;
+      rows.push(row);
+      if (row.id) rowY[row.id] = row.y - 4;
+      y += LINE;
+    }
     function section(title) { y += 4; push({ kind: "section", text: title }); }
     function overflow(count, shown) {
       if (count > shown) push({ kind: "more", text: "+" + (count - shown) + " more" });
     }
+    function isVisible(id) { return !id || !options.active || options.active[id]; }
 
     var ctor = object.constructor || { params: [], method_id: null };
     section("constructor");
-    push({ kind: "text", text: ctor.method_id ? methodSignature(ctor.method_id, ctor.params) : "none" });
+    if (ctor.method_id && isVisible(ctor.method_id)) {
+      push({ kind: "method", id: ctor.method_id, constructor: true, text: methodSignature(ctor.method_id, ctor.params) });
+    } else {
+      push({ kind: "text", text: "none" });
+    }
     var fields = object.fields || [];
     fields.slice(0, 4).forEach(function (field) {
       var source = field.source_kind === "literal" ? "literal" : field.source_name || field.source_kind;
@@ -2553,27 +2853,33 @@
     });
     overflow(fields.length, 4);
 
-    var publicIds = object.methods.public || [];
-    var privateIds = object.methods.private || [];
+    var publicIds = objectMethodIds(object).filter(function (id) {
+      return objectMethodVisibility[id] === "public" && isVisible(id);
+    });
+    var privateIds = objectMethodIds(object).filter(function (id) {
+      return objectMethodVisibility[id] === "private" && isVisible(id);
+    });
+    var publicLimit = options.allMethods ? publicIds.length : 6;
+    var privateLimit = options.allMethods ? privateIds.length : 4;
     section("public");
     if (!publicIds.length) push({ kind: "text", text: "none" });
-    publicIds.slice(0, 6).forEach(function (id) { push({ kind: "method", id: id, tick: true }); });
-    overflow(publicIds.length, 6);
+    publicIds.slice(0, publicLimit).forEach(function (id) { push({ kind: "method", id: id, tick: true }); });
+    overflow(publicIds.length, publicLimit);
     if (privateIds.length) {
       section("internal");
-      privateIds.slice(0, 4).forEach(function (id) { push({ kind: "method", id: id }); });
-      overflow(privateIds.length, 4);
+      privateIds.slice(0, privateLimit).forEach(function (id) { push({ kind: "method", id: id }); });
+      overflow(privateIds.length, privateLimit);
     }
 
     var height = y + 8 + 29; // content + gap + state strip
     var longest = 18;
     rows.forEach(function (row) {
-      var label = row.kind === "method" ? (nodeById[row.id] || { name: row.id }).name : row.text;
+      var label = row.kind === "method" ? row.text || (nodeById[row.id] || { name: row.id }).name : row.text;
       longest = Math.max(longest, (label || "").length);
     });
     longest = Math.max(longest, object.name.length);
     var width = Math.min(360, Math.max(260, 36 + longest * 6.3));
-    return { rows: rows, width: width, height: height, chars: Math.floor((width - 26) / 6.3) };
+    return { rows: rows, rowY: rowY, width: width, height: height, chars: Math.floor((width - 26) / 6.3) };
   }
 
   function objectCard(it) {
@@ -2585,7 +2891,12 @@
     var object = it.node;
     var card = objectCard(it);
     var h = card.height;
-    var g = group("node object-node" + (on ? "" : " muted"), it.cx - it.w / 2, it.cy - h / 2);
+    var activePathIndex = it.activePathIndex === null || it.activePathIndex === undefined ? 0 : it.activePathIndex;
+    var workflowClass = it.traceFunctionIds
+      ? " object-workflow-active path-" + activePathIndex
+      : "";
+    var objectKindClass = it.isPipelineHead ? " class-workflow-object" : "";
+    var g = group("node object-node" + objectKindClass + workflowClass + (on ? "" : " muted"), it.cx - it.w / 2, it.cy - h / 2);
     g.setAttribute("role", "group");
     g.setAttribute("aria-label", "Object " + object.name);
     var r = rect(it.w, h, "object-rect");
@@ -2608,7 +2919,21 @@
         var node = nodeById[row.id];
         if (!node) return;
         if (row.tick) g.appendChild(line(0, row.y - 4, 8, row.y - 4, "object-surface-tick"));
-        var label = text(row.tick ? 12 : 24, row.y, row.tick ? "object-method public" : "object-method", truncate(node.name, card.chars));
+        var pathIndex = it.methodPathIndex && it.methodPathIndex[row.id];
+        var rowClass = row.tick ? "object-method public workflow-head" : "object-method";
+        if (it.traceFunctionIds) {
+          if (it.traceFunctionIds[row.id]) {
+            rowClass += " workflow-active path-" + activePathIndex;
+          } else {
+            if (pathIndex !== undefined) rowClass += " path-" + pathIndex;
+            rowClass += " workflow-muted";
+          }
+        } else if (pathIndex !== undefined) {
+          rowClass += " path-" + pathIndex;
+        }
+        if (state.graphSelectionType === "function" && state.graphSelection === row.id) rowClass += " selected";
+        var methodLabel = row.text || node.name;
+        var label = text(row.tick ? 12 : 24, row.y, rowClass, truncate(methodLabel, card.chars));
         label.setAttribute("data-function-focus", row.id);
         makeSvgButton(label, "Inspect method " + node.name, function (event) {
           event.stopPropagation();
@@ -2647,8 +2972,8 @@
     p.setAttribute("d", edgePath(a, b, edgeInfo));
     p.setAttribute("class", cls);
     if (edgeInfo) {
-      p.setAttribute("data-src", edgeInfo.source);
-      p.setAttribute("data-tgt", edgeInfo.target);
+      p.setAttribute("data-src", edgeInfo.sourceFunction || edgeInfo.source);
+      p.setAttribute("data-tgt", edgeInfo.targetFunction || edgeInfo.target);
       p.setAttribute("data-path-id", edgeInfo.pathId === undefined ? "" : edgeInfo.pathId);
     }
     if (cls.indexOf("clone") === -1) {
@@ -2726,7 +3051,7 @@
     var count = graph.kind === "global"
       ? graph.items.length + " files · " + graph.edges.length + " cross-file calls"
       : graph.kind === "pipeline-overview"
-        ? graph.items.length + " functions · " + graph.groups.length + " public pipelines · " + graph.freeItemIds.length + " unattached"
+        ? graph.items.length + " nodes · " + graph.workflows.length + " workflows · " + graph.freeItemIds.length + " unattached"
       : graph.items.length + " " + label;
     document.getElementById("tools").innerHTML =
       modeToggle(scopedNode, objectModeAvailable) +
@@ -2834,35 +3159,39 @@
   }
 
   function bindGraphPromptEdge(path, edgeInfo) {
+    var sourceId = edgeInfo.sourceFunction || edgeInfo.source;
+    var targetId = edgeInfo.targetFunction || edgeInfo.target;
     path.classList.add("graph-prompt-edge");
-    path.setAttribute("data-edge-source", edgeInfo.source);
-    path.setAttribute("data-edge-target", edgeInfo.target);
-    path.setAttribute("data-src", edgeInfo.source);
-    path.setAttribute("data-tgt", edgeInfo.target);
+    path.setAttribute("data-edge-source", sourceId);
+    path.setAttribute("data-edge-target", targetId);
+    path.setAttribute("data-src", sourceId);
+    path.setAttribute("data-tgt", targetId);
     if (state.graphPromptTarget && state.graphPromptTarget.type === "dependency" &&
-        state.graphPromptTarget.sourceId === edgeInfo.source && state.graphPromptTarget.targetId === edgeInfo.target) {
+        state.graphPromptTarget.sourceId === sourceId && state.graphPromptTarget.targetId === targetId) {
       path.classList.add("graph-prompt-edge-active");
     }
-    makeSvgButton(path, "Comment on dependency from " + graphPromptFunctionName(edgeInfo.source) +
-      " to " + graphPromptFunctionName(edgeInfo.target), function (event) {
+    makeSvgButton(path, "Comment on dependency from " + graphPromptFunctionName(sourceId) +
+      " to " + graphPromptFunctionName(targetId), function (event) {
       event.stopPropagation();
-      openGraphPromptTarget(graphPromptDependencyTarget(edgeInfo.source, edgeInfo.target));
+      openGraphPromptTarget(graphPromptDependencyTarget(sourceId, targetId));
     });
   }
 
   function bindTraceEdge(path, edgeInfo) {
-    var call = callByEdge[edgeInfo.source + ">" + edgeInfo.target];
+    var sourceId = edgeInfo.sourceFunction || edgeInfo.source;
+    var targetId = edgeInfo.targetFunction || edgeInfo.target;
+    var call = callByEdge[sourceId + ">" + targetId];
     var location = call ? " at line " + call.line : "";
-    path.setAttribute("data-edge-source", edgeInfo.source);
-    path.setAttribute("data-edge-target", edgeInfo.target);
-    makeSvgButton(path, "Inspect call from " + graphPromptFunctionName(edgeInfo.source) +
-      " to " + graphPromptFunctionName(edgeInfo.target) + location, function (event) {
+    path.setAttribute("data-edge-source", sourceId);
+    path.setAttribute("data-edge-target", targetId);
+    makeSvgButton(path, "Inspect call from " + graphPromptFunctionName(sourceId) +
+      " to " + graphPromptFunctionName(targetId) + location, function (event) {
       event.stopPropagation();
-      state.graphSelection = edgeInfo.source;
+      state.graphSelection = sourceId;
       state.graphSelectionType = "function";
-      state.detailSelection = { type: "function", id: edgeInfo.source };
+      state.detailSelection = { type: "function", id: sourceId };
       state.sourceRange = call ? {
-        symbolId: edgeInfo.source,
+        symbolId: sourceId,
         anchorLine: call.line,
         startLine: call.line,
         endLine: call.line,
@@ -4005,8 +4334,10 @@
   function selectObjectMethod(objectId, methodId) {
     var object = objectById[objectId];
     if (!object || objectMethodIds(object).indexOf(methodId) < 0 || !nodeById[methodId]) return;
-    state.mode = "objects";
-    state.scope = object.module;
+    if (state.mode !== "global") {
+      state.mode = "objects";
+      state.scope = object.module;
+    }
     startTrace(methodId);
   }
 
@@ -4059,7 +4390,7 @@
         symbolId: node.id,
         sourceRange: state.sourceRange,
       });
-    panel.querySelector(".detail-close").addEventListener("click", clearGraphSelection);
+    panel.querySelector(".detail-close").addEventListener("click", hideDetail);
     bindInlinePromptActions(panel, node.id);
   }
 
@@ -4142,7 +4473,12 @@
   }
 
   function hideDetail() {
-    clearGraphSelection();
+    var closedSelection = state.detailSelection;
+    resetInlinePrompt();
+    state.detailSelection = null;
+    state.sourceRange = null;
+    rerender();
+    restoreDetailFocus(closedSelection);
   }
 
   function clearGraphSelection() {
@@ -4158,6 +4494,10 @@
     state.focus = null;
     state.sourceRange = null;
     rerender();
+    restoreDetailFocus(closedSelection);
+  }
+
+  function restoreDetailFocus(closedSelection) {
     var focusTarget = detailReturnFocus && detailReturnFocus !== document.body &&
       detailReturnFocus.isConnected && !detailReturnFocus.closest("[hidden]")
       ? detailReturnFocus
@@ -4182,7 +4522,7 @@
     card.innerHTML =
       '<button class="detail-close" aria-label="Close source inspector">×</button>' +
       sourceBlock(object, null);
-    card.querySelector(".detail-close").addEventListener("click", clearGraphSelection);
+    card.querySelector(".detail-close").addEventListener("click", hideDetail);
   }
 
   function objectFieldTable(fields) {

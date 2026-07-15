@@ -965,7 +965,7 @@ body::after { opacity: 0.08; }
 .py-num { color: #79c0ff; }
 .py-focus { background: rgba(56, 139, 253, 0.22); color: #e6edf3; }
 
-.node.muted { opacity: 1; }
+.node.muted { opacity: 0.42; }
 .edge {
   fill: none;
   opacity: 1;
@@ -997,12 +997,12 @@ body::after { opacity: 0.08; }
 .path-19 { --path-color: #9edae5; }
 .edge.muted,
 .file-edge.dim,
-.file-edge.muted { opacity: 1; }
+.file-edge.muted { opacity: 0.16; }
 .edge.mutual { stroke: var(--path-color, #1f77b4); }
 .clone-edge,
 .extends-edge { stroke: #6e7681; stroke-width: 1; }
 .clone-edge { stroke-dasharray: 7 5; }
-.trace-context-edge { opacity: 1; }
+.trace-context-edge { opacity: 0.16; }
 .trace-edge {
   opacity: 1;
   stroke: var(--path-color, #1f77b4) !important;
@@ -1087,6 +1087,11 @@ rect.selected-ring { stroke: #e6edf3 !important; stroke-width: 3px !important; }
   stroke-dasharray: 8 5;
   stroke-width: 1.5;
 }
+.pipeline-compartment-box.class-workflow-compartment {
+  stroke-dasharray: none;
+  stroke-width: 2.5;
+}
+.workflow-context-region { opacity: 0.24; }
 .pipeline-compartment-title {
   fill: var(--path-color, #e6edf3);
   font-size: 10px;
@@ -1102,6 +1107,12 @@ rect.selected-ring { stroke: #e6edf3 !important; stroke-width: 3px !important; }
 .pipeline-outside-title { fill: #8b949e; }
 .node.pipeline-head rect { stroke: var(--path-color); stroke-width: 3; }
 .node.pipeline-head .node-meta { fill: var(--path-color); font-weight: 700; }
+.object-node.class-workflow-object .object-rect { stroke: #e6edf3; stroke-width: 2.5; }
+.object-node.object-workflow-active .object-rect { stroke: var(--path-color); stroke-width: 3; }
+.object-method.workflow-head { fill: var(--path-color); font-weight: 750; }
+.object-method.workflow-active { fill: var(--path-color); font-weight: 800; opacity: 1; }
+.object-method.workflow-muted { opacity: 0.24; }
+.object-method.selected { fill: #e6edf3; text-decoration: underline; }
 
 .tools { margin-left: auto; }
 .edge-legend { align-items: center; display: inline-flex; gap: 4px; }
