@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Atlas projects</title>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+  </head>
+  <body>
+    <script nonce="__ATLAS_NONCE__">
+      window.ATLAS_DASHBOARD = __ATLAS_DASHBOARD_CONFIG__;
+    </script>
+    <header class="dashboard-header">
+      <h1>Atlas projects</h1>
+      <button id="refreshAll" type="button">Update all</button>
+    </header>
+    <main>
+      <section class="add-project" aria-labelledby="addProjectTitle">
+        <div>
+          <h2 id="addProjectTitle">Add projects</h2>
+          <p>Enter one exact project directory per line. Registration only saves the paths.</p>
+        </div>
+        <form id="addProjectForm">
+          <label for="projectPaths">Project directories</label>
+          <textarea id="projectPaths" rows="3" required spellcheck="false" placeholder="/Users/me/Code/project"></textarea>
+          <div class="optional-fields">
+            <label>
+              Name for a single project
+              <input id="projectName" type="text">
+            </label>
+          </div>
+          <div class="form-actions">
+            <span id="formStatus" role="status"></span>
+            <button type="submit">Register</button>
+          </div>
+        </form>
+      </section>
+      <section aria-labelledby="projectListTitle">
+        <div class="section-heading">
+          <h2 id="projectListTitle">Registered projects</h2>
+          <span id="projectCount"></span>
+        </div>
+        <div id="projects" class="project-list"></div>
+        <p id="emptyState" class="empty-state" hidden>No projects registered yet.</p>
+      </section>
+    </main>
+    <script src="/dashboard/dashboard.js"></script>
+  </body>
+</html>

@@ -5,7 +5,7 @@ import builtins
 from collections import defaultdict
 from dataclasses import dataclass
 
-from atlas.analyzer.imports import build_import_aliases
+from atlas.analyzer.imports import build_import_aliases, resolve_from_base
 from atlas.analyzer.models import CallInfo, ImportInfo, SymbolInfo
 from atlas.analyzer.parser import ParsedFile
 
@@ -207,6 +207,7 @@ def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> li
     symbols_by_file: dict[str, list[SymbolInfo]] = defaultdict(list)
     for symbol in symbols:
         symbols_by_file[symbol.file_id].append(symbol)
+    exported_symbols = _exported_symbols(parsed_files, symbols)
 
     calls: list[CallInfo] = []
     for parsed in parsed_files:
@@ -232,6 +233,7 @@ def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> li
             ],
             local_modules,
             symbol_ids,
+            exported_symbols,
         )
         module_import_names = {
             _visible_import_name(info) for info in module_scope_imports
@@ -265,6 +267,7 @@ def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> li
                         ],
                         local_modules,
                         symbol_ids,
+                        exported_symbols,
                     )
                 )
                 calls.append(
@@ -282,6 +285,159 @@ def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> li
                     )
                 )
     return sorted(calls, key=lambda call: (call.source, call.line, call.called_name, call.kind))
+
+
+def _exported_symbols(
+    parsed_files: list[ParsedFile], symbols: list[SymbolInfo]
+) -> dict[str, str]:
+    """Map public module names to their underlying local definitions.
+
+    Package ``__init__`` files commonly expose a stable API with imports such as
+    ``from .layout import build_device``. Calls through that API should still point
+    to the implementation symbol so workflows reach the reusable code they use.
+    """
+    exports = {
+        symbol.id: symbol.id
+        for symbol in symbols
+        if symbol.kind in {"function", "class"}
+    }
+    pending: list[tuple[str, str]] = []
+
+    for parsed in parsed_files:
+        direct_imports = _module_imports(parsed)
+        direct_names = {_visible_import_name(info) for info in direct_imports}
+        ambiguous_names = (
+            _conditional_import_names(_scope_imports(parsed, parsed.tree), direct_imports)
+            | AssignmentVisitor().collect(parsed.tree)
+            | (_direct_definition_names(parsed.tree) & direct_names)
+        )
+        for info in direct_imports:
+            visible_name = _visible_import_name(info)
+            if (
+                info.kind != "from"
+                or info.name == "*"
+                or visible_name in ambiguous_names
+            ):
+                continue
+            base = _reexport_base(parsed, info)
+            imported_name = f"{base}.{info.name}" if base else info.name
+            public_name = f"{parsed.file.module}.{visible_name}"
+            pending.append((public_name, imported_name))
+
+    changed = True
+    while changed:
+        changed = False
+        for public_name, imported_name in pending:
+            target = exports.get(imported_name)
+            if target is None or public_name in exports:
+                continue
+            exports[public_name] = target
+            changed = True
+    return exports
+
+
+def package_exports(
+    parsed_files: list[ParsedFile], symbols: list[SymbolInfo]
+) -> dict[str, list[str]]:
+    """Map each local symbol a public package exports to the packages exporting it.
+
+    A package ``__init__`` exports the literal names its module-level ``__all__``
+    lists. Without ``__all__`` it exports what ``from package import *`` binds:
+    the public names it defines or imports with a module-level ``from`` import.
+    Names resolve through the re-export map to the defining function or class,
+    and a class's constructor and public methods are exported with it. A
+    private package (``pkg._impl``) or a test package exports nothing, because
+    its names are not offered to the package's users.
+    """
+    reexports = _exported_symbols(parsed_files, symbols)
+    exported: dict[str, set[str]] = defaultdict(set)
+    for parsed in parsed_files:
+        module = parsed.file.module
+        if (
+            parsed.file.path.rsplit("/", 1)[-1] != "__init__.py"
+            or parsed.file.is_test
+            or any(part.startswith("_") for part in module.split("."))
+        ):
+            continue
+        for name in _package_public_names(parsed):
+            target = reexports.get(f"{module}.{name}")
+            if target is not None:
+                exported[target].add(module)
+    for symbol in symbols:
+        if (
+            symbol.kind == "method"
+            and symbol.class_id in exported
+            and (symbol.name == "__init__" or not symbol.is_private)
+        ):
+            exported[symbol.id] |= exported[symbol.class_id]
+    return {symbol_id: sorted(modules) for symbol_id, modules in sorted(exported.items())}
+
+
+def _package_public_names(parsed: ParsedFile) -> set[str]:
+    declared = _declared_all(parsed.tree)
+    if declared is not None:
+        return declared
+    imported = {
+        _visible_import_name(info) for info in _module_imports(parsed) if info.kind == "from"
+    }
+    return {
+        name
+        for name in imported | _direct_definition_names(parsed.tree)
+        if not name.startswith("_")
+    }
+
+
+def _declared_all(tree: ast.Module) -> set[str] | None:
+    names: set[str] | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            continue
+        listed = {
+            item.value
+            for item in getattr(value, "elts", [])
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        }
+        names = (names or set()) | listed if isinstance(node, ast.AugAssign) else listed
+    return names
+
+
+def resolve_import_symbols(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> None:
+    """Record on each ``from`` import the local definition its name binds.
+
+    ``from tempura.mesh import build_meshed_device`` names the package, but the
+    function is defined in ``tempura.mesh._built``; the package ``__init__``
+    only re-exports it. Following the same export map that call resolution uses
+    sets ``symbol`` to the defining function or class. Module imports, star
+    imports, external names, and names bound to anything but a local function
+    or class keep ``symbol`` as None.
+    """
+    exports = _exported_symbols(parsed_files, symbols)
+    for parsed in parsed_files:
+        for info in parsed.imports:
+            if info.kind != "from" or info.name == "*":
+                continue
+            base = _reexport_base(parsed, info)
+            info.symbol = exports.get(f"{base}.{info.name}" if base else info.name)
+
+
+def _reexport_base(parsed: ParsedFile, info: ImportInfo) -> str:
+    if info.level == 0 or not parsed.file.path.endswith("/__init__.py"):
+        return resolve_from_base(
+            parsed.file.module, info.imported_module, info.level
+        )
+
+    parts = parsed.file.module.split(".")
+    parent_count = max(0, info.level - 1)
+    base_parts = parts[: len(parts) - parent_count] if parent_count else parts
+    if info.imported_module:
+        base_parts.extend(info.imported_module.split("."))
+    return ".".join(base_parts)
 
 
 def _module_imports(parsed: ParsedFile) -> list[ImportInfo]:
@@ -482,6 +638,7 @@ def _resolved_call(
     line: int,
     symbol_by_id: dict[str, SymbolInfo],
 ) -> CallInfo:
+    target = _constructor_target(target, symbol_by_id)
     source_file = symbol_by_id[source].file_id
     target_file = symbol_by_id[target].file_id
     kind = "same_file" if source_file == target_file else "cross_file"
@@ -494,6 +651,21 @@ def _resolved_call(
         confidence=1.0,
         line=line,
     )
+
+
+def _constructor_target(target: str, symbol_by_id: dict[str, SymbolInfo]) -> str:
+    """Aim a call to a class at the class's own ``__init__`` when it defines one.
+
+    ``Cls(...)`` runs ``Cls.__init__``, so the call lands on the code that
+    executes and joins the call graph like any other call. A class without its
+    own ``__init__`` (a dataclass, or one inheriting its constructor) stays the
+    target: the code that runs is generated or lives in a base class, which
+    Atlas does not follow.
+    """
+    constructor = f"{target}.__init__"
+    if symbol_by_id[target].kind == "class" and constructor in symbol_by_id:
+        return constructor
+    return target
 
 
 def _external_call(source: str, called_name: str, line: int) -> CallInfo:

@@ -13,3 +13,7 @@ dist/
 build/
 htmlcov/
 *.egg-info/
+
+node_modules/
+prototypes/
+test-results/

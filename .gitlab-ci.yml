@@ -22,6 +22,17 @@ test-python-floor:
     - python -m pip install --disable-pip-version-check -e ".[test]"
     - python -B -m pytest
 
+explorer-javascript:
+  stage: test
+  image: node:22-slim
+  before_script:
+    - npm ci
+  script:
+    - npm run lint
+    - npm test
+    - npm run build
+    - git diff --exit-code -- src/atlas/explorer/static/app.bundle.js src/atlas/explorer/static/app.bundle.js.LEGAL.txt
+
 distribution:
   stage: test
   image: python:3.13-slim
@@ -32,7 +43,7 @@ distribution:
     - /tmp/atlas-wheel/bin/python -m pip install --disable-pip-version-check --no-deps dist/*.whl
     - cd /tmp
     - /tmp/atlas-wheel/bin/atlas --help
-    - /tmp/atlas-wheel/bin/python -c "from atlas.explorer.writer import STATIC_DIR; assert (STATIC_DIR / 'index.html').is_file(); assert (STATIC_DIR / 'styles.css').is_file(); assert (STATIC_DIR / 'src/app.js').is_file()"
+    - /tmp/atlas-wheel/bin/python -c "from atlas.explorer.writer import STATIC_DIR; assert (STATIC_DIR / 'index.html').is_file(); assert (STATIC_DIR / 'styles.css').is_file(); assert (STATIC_DIR / 'app.bundle.js').is_file()"
     - /tmp/atlas-wheel/bin/python -c "import sysconfig; from pathlib import Path; assert (Path(sysconfig.get_path('data')) / 'share/atlas/schema/atlas.schema.json').is_file()"
 
 deploy-pages:

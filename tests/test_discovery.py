@@ -1,7 +1,12 @@
 from pathlib import Path
 import subprocess
 
-from atlas.analyzer.discovery import discover_files, discover_python_files, module_from_path
+from atlas.analyzer.discovery import (
+    discover_directories,
+    discover_files,
+    discover_python_files,
+    module_from_path,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -55,3 +60,16 @@ def test_discovery_skips_symlinked_files(tmp_path):
     (root / "linked.py").symlink_to(outside)
 
     assert discover_python_files(root) == []
+
+
+def test_discovery_excludes_cache_directories(tmp_path):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "module.py").write_text("", encoding="utf-8")
+    for name in (".cache", "__pycache__", "custom_pycache_data"):
+        cache = package / name
+        cache.mkdir()
+        (cache / "stale.py").write_text("", encoding="utf-8")
+
+    assert discover_python_files(tmp_path) == [Path("package/module.py")]
+    assert discover_directories(tmp_path) == ["package"]

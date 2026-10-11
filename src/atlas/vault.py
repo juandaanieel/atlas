@@ -38,8 +38,7 @@ def write_vault(
     functions_dir = generated_dir / "Functions"
     modules_dir = generated_dir / "Modules"
     pipelines_dir = generated_dir / "Pipelines"
-    use_cases_dir = generated_dir / "Use-cases"
-    for directory in (functions_dir, modules_dir, pipelines_dir, use_cases_dir):
+    for directory in (functions_dir, modules_dir, pipelines_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     _ensure_human_space(vault_dir)
@@ -58,19 +57,10 @@ def write_vault(
         pipeline["id"]: pipelines_dir / _note_name(pipeline["id"])
         for pipeline in architecture["pipelines"]
     }
-    use_case_paths = {
-        use_case["id"]: use_cases_dir / _note_name(use_case["id"])
-        for use_case in architecture["use_cases"]
-    }
     functionality_paths = {
         functionality["id"]: vault_dir / FUNCTIONALITIES_DIR / functionality["path"]
         for functionality in architecture["functionalities"]
     }
-
-    use_cases_by_function: dict[str, list[dict]] = defaultdict(list)
-    for use_case in architecture["use_cases"]:
-        for function_id in use_case["function_ids"]:
-            use_cases_by_function[function_id].append(use_case)
 
     pipelines_by_function: dict[str, list[dict]] = defaultdict(list)
     for pipeline in architecture["pipelines"]:
@@ -86,24 +76,20 @@ def write_vault(
                 function_paths,
                 module_paths,
                 pipeline_paths,
-                use_case_paths,
                 functionality_paths,
                 functions_by_id,
                 pipelines_by_function[function["id"]],
-                use_cases_by_function[function["id"]],
             ),
             encoding="utf-8",
         )
 
     _write_module_notes(functions, module_paths, function_paths)
     _write_pipeline_notes(architecture["pipelines"], pipeline_paths, function_paths, functions_by_id)
-    _write_use_case_notes(architecture["use_cases"], use_case_paths, function_paths, functions_by_id)
     _write_home(
         payload,
         generated_dir,
         module_paths,
         pipeline_paths,
-        use_case_paths,
         functionality_paths,
     )
     _write_manifest(
@@ -112,7 +98,6 @@ def write_vault(
         function_paths,
         module_paths,
         pipeline_paths,
-        use_case_paths,
         functionality_paths,
     )
     return vault_dir
@@ -154,11 +139,9 @@ def _function_note(
     function_paths: dict[str, Path],
     module_paths: dict[str, Path],
     pipeline_paths: dict[str, Path],
-    use_case_paths: dict[str, Path],
     functionality_paths: dict[str, Path],
     functions_by_id: dict[str, dict],
     pipelines: list[dict],
-    use_cases: list[dict],
 ) -> str:
     lines = _frontmatter(
         {
@@ -235,12 +218,6 @@ def _function_note(
     else:
         lines.append("- None.")
 
-    lines.extend(["", "## Use cases", ""])
-    if use_cases:
-        for use_case in use_cases:
-            lines.append(_link(use_case["title"], path, use_case_paths[use_case["id"]], prefix="- "))
-    else:
-        lines.append("- None found in repository documentation.")
     lines.extend(["", "## Accepted functionalities", ""])
     if function["functionalities"]:
         for functionality_id in function["functionalities"]:
@@ -307,52 +284,11 @@ def _write_pipeline_notes(
         path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_use_case_notes(
-    use_cases: list[dict],
-    use_case_paths: dict[str, Path],
-    function_paths: dict[str, Path],
-    functions_by_id: dict[str, dict],
-) -> None:
-    for use_case in use_cases:
-        path = use_case_paths[use_case["id"]]
-        lines = _frontmatter(
-            {
-                "atlas_kind": "use-case",
-                "atlas_id": use_case["id"],
-                "source_path": use_case["path"],
-                "kind": use_case["kind"],
-                "examples": use_case["example_paths"],
-            }
-        )
-        lines.extend(
-            [
-                f"# {use_case['title']}",
-                "",
-                use_case["summary"],
-                "",
-                f"**Source:** `{use_case['path']}`",
-                "",
-                "## Related functions",
-                "",
-            ]
-        )
-        if use_case["function_ids"]:
-            for function_id in use_case["function_ids"]:
-                function = functions_by_id.get(function_id)
-                if function:
-                    lines.append(_link(function["qualified_name"], path, function_paths[function_id], prefix="- "))
-        else:
-            lines.append("- No public function names were found in this page.")
-        lines.append("")
-        path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def _write_home(
     payload: dict,
     generated_dir: Path,
     module_paths: dict[str, Path],
     pipeline_paths: dict[str, Path],
-    use_case_paths: dict[str, Path],
     functionality_paths: dict[str, Path],
 ) -> None:
     path = generated_dir / "Home.md"
@@ -381,12 +317,6 @@ def _write_home(
             lines.append(_link(pipeline["title"], path, pipeline_paths[pipeline["id"]], prefix="- "))
     else:
         lines.append("- No entry pipeline contains a statically resolved call.")
-    lines.extend(["", "## Use cases", ""])
-    if use_case_paths:
-        for use_case in payload["architecture"]["use_cases"]:
-            lines.append(_link(use_case["title"], path, use_case_paths[use_case["id"]], prefix="- "))
-    else:
-        lines.append("- No README, docs, or Markdown examples were found.")
     lines.extend(["", "## Functionalities", ""])
     available = [
         functionality
@@ -415,7 +345,6 @@ def _write_manifest(
     function_paths: dict[str, Path],
     module_paths: dict[str, Path],
     pipeline_paths: dict[str, Path],
-    use_case_paths: dict[str, Path],
     functionality_paths: dict[str, Path],
 ) -> None:
     vault_dir = generated_dir.parent
@@ -426,7 +355,6 @@ def _write_manifest(
         "functions": _relative_paths(vault_dir, function_paths),
         "modules": _relative_paths(vault_dir, module_paths),
         "pipelines": _relative_paths(vault_dir, pipeline_paths),
-        "use_cases": _relative_paths(vault_dir, use_case_paths),
         "functionalities": _relative_paths(vault_dir, functionality_paths),
     }
     (generated_dir / "manifest.json").write_text(

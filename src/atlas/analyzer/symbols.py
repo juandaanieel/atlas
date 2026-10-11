@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 
 from atlas.analyzer.classify import is_entrypoint_name, is_private_name, is_test_symbol
+from atlas.analyzer.complexity import function_complexity
 from atlas.analyzer.docstrings import summarize_docstring
 from atlas.analyzer.fingerprint import is_wrapper_body, structure_signature
 from atlas.analyzer.models import SymbolInfo
@@ -142,7 +143,7 @@ def _function_symbol(
         structure_hash=structure_hash,
         structure_size=structure_size,
         is_wrapper=is_wrapper_body(node),
-        metrics=_empty_metrics(),
+        metrics={**_empty_metrics(), **function_complexity(node)},
         warnings=warnings,
     )
 
@@ -183,6 +184,9 @@ def _add_parameter(
 
 def _empty_metrics() -> dict[str, int]:
     return {
+        "cyclomatic_complexity": 0,
+        "cognitive_complexity": 0,
+        "max_nesting_depth": 0,
         "same_file_incoming": 0,
         "same_file_outgoing": 0,
         "cross_file_outgoing": 0,

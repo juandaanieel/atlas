@@ -124,6 +124,89 @@ def test_payload_includes_objects_and_classes_without_constructors_or_methods():
     assert payload["overview"]["class_count"] == 5
 
 
+def test_onion_rings_place_public_surface_on_the_skin_and_privates_inward():
+    payload = analyze_path(FIXTURES / "class_package")
+    objects = {item["id"]: item for item in payload["objects"]}
+    onion = objects["class_pkg.runner.Runner"]["onion"]
+    ring_by_method = {item["id"]: item for item in onion["methods"]}
+
+    # The skin (ring 0) is the constructor plus every public method.
+    assert onion["ring_count"] == 2
+    assert ring_by_method["class_pkg.runner.Runner.__init__"]["ring"] == 0
+    assert ring_by_method["class_pkg.runner.Runner.run"]["ring"] == 0
+    # Privates reached only from the skin sit one ring deeper, none detached.
+    assert ring_by_method["class_pkg.runner.Runner._prepare"]["ring"] == 1
+    assert ring_by_method["class_pkg.runner.Runner._normalize"]["ring"] == 1
+    assert all(not item["detached"] for item in onion["methods"])
+
+
+def test_onion_flags_private_methods_no_public_surface_reaches(tmp_path):
+    source = tmp_path / "widget.py"
+    source.write_text(
+        """class Widget:
+    def render(self):
+        return self._draw()
+
+    def _draw(self):
+        return 1
+
+    def _orphan(self):
+        return self._deeper_orphan()
+
+    def _deeper_orphan(self):
+        return 2
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_python_file(tmp_path, Path("widget.py"))
+    # extract_objects does not resolve calls, so rings need the call graph.
+    from atlas.analyzer.objects import assign_onion_rings
+
+    payload_objects = list(parsed.objects)
+    calls = [
+        {"source": "widget.Widget.render", "target": "widget.Widget._draw"},
+        {"source": "widget.Widget._orphan", "target": "widget.Widget._deeper_orphan"},
+    ]
+    assign_onion_rings(payload_objects, calls)
+    onion = next(item for item in payload_objects if item["id"] == "widget.Widget")["onion"]
+    ring_by_method = {item["id"]: item for item in onion["methods"]}
+
+    assert ring_by_method["widget.Widget.render"]["ring"] == 0
+    assert ring_by_method["widget.Widget._draw"]["ring"] == 1
+    # Never reached from the public surface: detached, no ring.
+    assert ring_by_method["widget.Widget._orphan"]["detached"] is True
+    assert ring_by_method["widget.Widget._orphan"]["ring"] is None
+    assert ring_by_method["widget.Widget._deeper_orphan"]["detached"] is True
+
+
+def test_dataclass_declared_fields_become_state_core(tmp_path):
+    source = tmp_path / "layer.py"
+    source.write_text(
+        """from dataclasses import dataclass
+
+
+@dataclass
+class Layer:
+    name: str
+    thickness_nm: float = 1.0
+
+    def __post_init__(self):
+        self.ready = True
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_python_file(tmp_path, Path("layer.py"))
+    layer = next(item for item in parsed.objects if item["id"] == "layer.Layer")
+    fields = {field["name"]: field for field in layer["fields"]}
+
+    assert fields["name"]["source_kind"] == "declaration"
+    assert fields["thickness_nm"]["source_kind"] == "declaration"
+    # Fields assigned inside methods still register alongside declarations.
+    assert "ready" in fields
+
+
 def test_object_source_and_calls_support_a_class_method_map():
     payload = analyze_path(FIXTURES / "class_package")
     objects = {item["id"]: item for item in payload["objects"]}

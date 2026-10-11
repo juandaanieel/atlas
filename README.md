@@ -1,106 +1,63 @@
 # Atlas
 
-Atlas is a local Python code explorer. It analyzes one folder, writes a static
-HTML explorer into that folder, and does not need a server or internet access to
-view the result.
+Atlas turns a Python project into an interactive map you can explore locally.
+Start with a guided tour, follow calls between modules, and open the source
+without losing your place.
 
-Atlas uses Python's AST. It does not use AI and it does not invent call edges
-when static analysis cannot prove them.
+![A guided package overview in Strata’s dark theme](docs/images/strata-overview.jpg)
 
-## Install
+## Try it
 
-Atlas uses Pixi for local development and execution. From the repository root:
+From this repository, install the environment and analyze a project:
 
-```bash
+```sh
 pixi install
+pixi run atlas explore --where /path/to/project
 ```
 
-## Basic usage
+Open `/path/to/project/.atlas/explorer/index.html` in a desktop browser with
+WebGL 2 support. The export includes its data and JavaScript: no server,
+account, or internet connection is needed. Share the whole `explorer` folder.
 
-Run Atlas with an explicit folder:
+For several projects, run `pixi run atlas dashboard`. Its local dashboard lets
+you register folders, refresh their analysis, and switch between them.
 
-```bash
-pixi run atlas explore --where PATH_TO_FOLDER_TO_EXPLORE
-```
+## How it works
 
-For example:
+Atlas reads Python syntax without importing or running your project. It finds
+functions, classes, imports, and calls it can resolve statically. Python then
+builds a deterministic layout and a reading guide; the browser draws the map.
+Dynamic calls can remain unresolved. The guide uses analysis rules, not AI.
 
-```bash
-pixi run atlas explore --where ./src
-```
+Packages sit on plates, modules appear as boxes, and their public names form
+rows. Unfold a module to see its functions and classes. Connections show calls;
+Plan view shows imports. The legend explains signals such as duplicate code,
+unused private functions, and import cycles.
 
-Atlas writes its output inside the explored folder:
+- Follow **Next** through the guide, or choose **Map** to explore freely.
+- Select a package or module in the scope tree; click a name to read its source.
+- Click an underlined call to inspect its target. **Backspace** returns.
+- Use **1 / 2 / 3** for camera views, **Home** to fit, and **Esc** to step back.
+- Press **?** for all controls and **T** to change the theme.
 
-```text
-PATH_TO_FOLDER_TO_EXPLORE/.atlas/atlas.json
-PATH_TO_FOLDER_TO_EXPLORE/.atlas/explorer/index.html
-PATH_TO_FOLDER_TO_EXPLORE/.atlas/vault/
-```
+![A pipeline and its linked source in Strata’s light theme](docs/images/strata-source.jpg)
 
-Open `index.html` in a browser to view the explorer. The generated `.atlas`
-directory is output, not source code. When the explored folder is inside a Git
-repository, Atlas adds the generated directory to `.git/info/exclude` so it stays
-out of `git status` without changing the repository's `.gitignore`.
-
-`atlas.json` is the canonical, versioned `AnalysisSnapshot` representation. The
-explorer and vault are generated from the same in-memory snapshot during one
-`atlas explore` run, while other tools can load the JSON representation later.
-
-## Architecture vault
-
-Atlas can also materialize an Obsidian-compatible vault. It writes one linked
-note per function or method, plus deterministic pipeline and example use-case
-notes. Use cases are documentation pages in `docs/` whose names match assets in
-`examples/`. Use `--workflow PATH` to add a Python example file, or every Python
-example beneath a directory, as a workflow use case without a matching Markdown
-page. The generated `00-atlas` directory is safe to regenerate; the
-`10-functionality` and `20-proposals` directories are reserved for reviewed
-architecture definitions and proposals.
-
-```bash
-pixi run atlas vault --where PATH_TO_FOLDER_TO_EXPLORE
-```
-
-Use `--out PATH` to write the vault somewhere else.
-
-An accepted functionality note lists stable Atlas function IDs in its
-frontmatter. Atlas projects that membership back onto the generated function
-notes as links and tags, while keeping the human-authored functionality note
-unchanged.
-
-## What it shows
-
-The explorer focuses on structural signals in Python packages:
-
-- Python files, modules, functions, classes, methods, imports, and static calls.
-- Entry points and reachable functions.
-- Dead private functions.
-- Structurally duplicated functions.
-- Highly connected functions.
-- Circular imports and unresolved calls.
-- Interactive static call tracing across source files. Open a function and use
-  `Trace from`, then Shift-click another function or use `Trace to` in its
-  inspector. Atlas highlights the directed route and lets each call edge open
-  its exact source line.
-- A repository city map whose directory and file areas follow the Mindwalk
-  squarified-treemap geometry; switch the left navigation rail to City map and
-  click a directory to drill into its contents.
+Analysis lives in `.atlas/atlas.json`; the reading path lives in
+`.atlas/atlas-story.json`. [Customize the guide](docs/guide.md) to choose your
+own entry points. Atlas also writes an Obsidian-compatible architecture vault.
 
 ## Development
 
-Run the test suite with:
-
-```bash
+```sh
 pixi run test
+npm ci
+npm run lint
+npm test
+npm run build
 ```
 
-Or, if the package is installed in another Python environment:
+Node is needed only to change the browser code. Commit the rebuilt bundle with
+its source so Python installations can generate exports immediately.
 
-```bash
-python -B -m pytest
-```
-
-## License
-
-Atlas is licensed under the GNU General Public License version 3. See
-`LICENSE`.
+Licensed under [GPL-3.0](LICENSE). Bundled Three.js uses the
+[MIT license](src/atlas/explorer/static/THREE-LICENSE.txt).

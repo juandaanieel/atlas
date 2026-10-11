@@ -7,6 +7,7 @@ from pathlib import Path
 
 EXCLUDED_DIRS = {
     ".atlas",
+    ".cache",
     ".git",
     ".hg",
     ".mypy_cache",
@@ -26,6 +27,24 @@ EXCLUDED_DIRS = {
 def discover_python_files(root: str | Path) -> list[Path]:
     """Return Python files below root in deterministic relative-path order."""
     return [Path(path) for path in discover_files(root) if Path(path).suffix == ".py"]
+
+
+def discover_directories(root: str | Path) -> list[str]:
+    """Return safe directories below root without following excluded paths."""
+    root_path = resolve_analysis_root(root)
+    found: list[str] = []
+    for current, directories, _ in os.walk(root_path):
+        current_path = Path(current)
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not _is_excluded_directory(name) and not (current_path / name).is_symlink()
+        )
+        found.extend(
+            (current_path / name).relative_to(root_path).as_posix()
+            for name in directories
+        )
+    return found
 
 
 def discover_files(root: str | Path) -> list[str]:
@@ -58,7 +77,7 @@ def safe_descendant_files(directory: str | Path) -> list[Path]:
         directories[:] = sorted(
             name
             for name in directories
-            if not (current_path / name).is_symlink()
+            if not _is_excluded_directory(name) and not (current_path / name).is_symlink()
         )
         for name in sorted(names):
             path = current_path / name
@@ -82,19 +101,6 @@ def resolve_analysis_root(root: str | Path) -> Path:
     resolved = path.resolve()
     if not resolved.is_dir():
         raise NotADirectoryError(f"Analysis path is not a directory: {path}")
-    return resolved
-
-
-def resolve_workflow_path(workflow: str | Path) -> Path:
-    """Resolve an explicit Python workflow file or workflow directory."""
-    path = Path(workflow).expanduser()
-    if not path.exists():
-        raise FileNotFoundError(f"Workflow path does not exist: {path}")
-    resolved = path.resolve()
-    if resolved.is_file() and resolved.suffix.lower() != ".py":
-        raise ValueError(f"Workflow file must be a Python file: {path}")
-    if not resolved.is_file() and not resolved.is_dir():
-        raise ValueError(f"Workflow path is not a file or directory: {path}")
     return resolved
 
 
@@ -130,7 +136,7 @@ def _walk_files(root: Path) -> list[str]:
         directories[:] = sorted(
             name
             for name in directories
-            if name not in EXCLUDED_DIRS and not (current_path / name).is_symlink()
+            if not _is_excluded_directory(name) and not (current_path / name).is_symlink()
         )
         for name in sorted(names):
             files.append((current_path / name).relative_to(root).as_posix())
@@ -140,7 +146,7 @@ def _walk_files(root: Path) -> list[str]:
 def _is_safe_file(root: Path, relative: Path) -> bool:
     if relative.is_absolute() or ".." in relative.parts:
         return False
-    if any(part in EXCLUDED_DIRS for part in relative.parts):
+    if any(_is_excluded_directory(part) for part in relative.parts):
         return False
 
     path = root / relative
@@ -152,6 +158,10 @@ def _is_safe_file(root: Path, relative: Path) -> bool:
     except (OSError, ValueError):
         return False
     return resolved.is_file()
+
+
+def _is_excluded_directory(name: str) -> bool:
+    return name in EXCLUDED_DIRS or "pycache" in name.lower()
 
 
 def module_from_path(root: str | Path, rel_path: str | Path) -> str:

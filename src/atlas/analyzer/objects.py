@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import defaultdict, deque
 
 from atlas.analyzer.classify import is_private_name
 from atlas.analyzer.docstrings import summarize_docstring
@@ -11,6 +12,7 @@ from atlas.analyzer.snippets import line_range, source_excerpt
 
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 SELF_NAMES = {"self", "cls"}
+DATACLASS_DECORATOR_NAMES = {"dataclass", "attrs", "attr", "define", "frozen"}
 
 
 class FieldAccessVisitor(ast.NodeVisitor):
@@ -139,6 +141,8 @@ def extract_objects(
         params_by_name = {str(param["name"]): param for param in constructor_params}
 
         fields_by_name: dict[str, dict[str, object]] = {}
+        for field_record in _declared_fields(node, class_by_name):
+            fields_by_name[str(field_record["name"])] = field_record
         field_access: list[dict[str, object]] = []
         for method in methods:
             method_id = method_ids[method.name]
@@ -193,7 +197,7 @@ def extract_objects(
         for field_name in collaborator_call_fields:
             field = fields_by_name.get(field_name)
             if field and field["collaborator_kind"] is None:
-                if field["source_kind"] == "param":
+                if field["source_kind"] in {"param", "declaration"}:
                     field["collaborator_kind"] = "injected"
                 elif field["source_kind"] == "call":
                     field["collaborator_kind"] = "owned"
@@ -240,6 +244,95 @@ def extract_objects(
         )
 
     return objects
+
+
+def assign_onion_rings(objects: list[dict], calls: list[dict]) -> None:
+    """Annotate each object with encapsulation-depth rings for the onion view.
+
+    Ring 0 is the class skin: the constructor plus every public method,
+    dunder protocol methods included. Private methods sit on deeper rings by
+    their shortest call distance from any skin method, so reading inward
+    descends from interface to implementation. Private methods no skin method
+    ever reaches are detached: they hang outside the onion.
+    """
+    outgoing: dict[str, set[str]] = defaultdict(set)
+    for call in calls:
+        if call["target"]:
+            outgoing[call["source"]].add(call["target"])
+
+    for item in objects:
+        methods = item["methods"]
+        constructor_id = item["constructor"]["method_id"]
+        skin = ([constructor_id] if constructor_id else []) + list(methods["public"])
+        member_ids = set(skin) | set(methods["private"])
+        ring = {method_id: 0 for method_id in skin}
+        queue = deque(skin)
+        while queue:
+            source = queue.popleft()
+            for target in sorted(outgoing[source]):
+                if target in member_ids and target not in ring:
+                    ring[target] = ring[source] + 1
+                    queue.append(target)
+        item["onion"] = {
+            "ring_count": max(ring.values(), default=-1) + 1,
+            "methods": [
+                {
+                    "id": method_id,
+                    "ring": ring.get(method_id),
+                    "detached": method_id not in ring,
+                }
+                for method_id in sorted(member_ids)
+            ],
+        }
+
+
+def _declared_fields(
+    node: ast.ClassDef,
+    class_by_name: dict[str, str],
+) -> list[dict[str, object]]:
+    """Collect class-body field declarations, the way dataclasses hold state."""
+    dataclass_like = _is_dataclass_like(node)
+    records = []
+    for child in node.body:
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+            name = child.target.id
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            annotation = _unparse(child.annotation)
+            collaborator_id = _resolve_annotation_target(annotation, class_by_name)
+            records.append(
+                {
+                    "name": name,
+                    "assigned_in": None,
+                    "source_kind": "declaration",
+                    "source_name": annotation or "",
+                    "collaborator_id": collaborator_id,
+                    "collaborator_kind": "injected" if collaborator_id and dataclass_like else None,
+                }
+            )
+        elif isinstance(child, ast.Assign):
+            for target in child.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id.startswith("__") and target.id.endswith("__"):
+                    continue
+                record = _field_record(
+                    target.id,
+                    child.value,
+                    assigned_in=None,
+                    params_by_name={},
+                    class_by_name=class_by_name,
+                )
+                records.append(record)
+    return records
+
+
+def _is_dataclass_like(node: ast.ClassDef) -> bool:
+    for decorator in node.decorator_list:
+        name = _dotted_name(decorator)
+        if name and name.split(".")[-1] in DATACLASS_DECORATOR_NAMES:
+            return True
+    return False
 
 
 def _base_records(
@@ -316,7 +409,7 @@ def _field_record(
     field_name: str,
     value: ast.AST,
     *,
-    assigned_in: str,
+    assigned_in: str | None,
     params_by_name: dict[str, dict[str, object]],
     class_by_name: dict[str, str],
 ) -> dict[str, object]:

@@ -10,7 +10,7 @@ from atlas.vault import write_vault
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_architecture_links_functions_pipelines_and_documentation():
+def test_architecture_links_functions_and_pipelines():
     payload = analyze_path(FIXTURES / "simple_package")
     architecture = payload["architecture"]
     functions = {function["id"]: function for function in architecture["functions"]}
@@ -24,15 +24,49 @@ def test_architecture_links_functions_pipelines_and_documentation():
     assert "atlas/state/root" in main["tags"]
     assert main["snapshot_id"] == payload["snapshot_id"]
     assert architecture["pipelines"][0]["root"] == "simple_pkg.a.main"
+    assert "use_cases" not in architecture
 
-    use_case = next(item for item in architecture["use_cases"] if item["path"] == "docs/basic_workflow.md")
-    assert [item["path"] for item in architecture["use_cases"]] == ["docs/basic_workflow.md"]
-    assert use_case["function_ids"] == ["simple_pkg.a.main"]
-    assert use_case["architecture"]["workflow_ids"] == ["simple_pkg.a.main"]
-    assert [call["id"] for call in functions["simple_pkg.a.main"]["callees"]] == [
-        "simple_pkg.a.helper",
-        "simple_pkg.b.beta",
+
+def test_pipelines_list_every_reachable_function(tmp_path):
+    package = tmp_path / "wide"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    steps = "".join(f"\n\ndef step_{index:02d}():\n    return finish()\n" for index in range(30))
+    calls = "".join(f"    step_{index:02d}()\n" for index in range(30))
+    (package / "flow.py").write_text(
+        f"def main():\n{calls}{steps}\n\ndef finish():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    pipeline = analyze_path(tmp_path)["architecture"]["pipelines"][0]
+
+    # Breadth-first from the root: its 30 callees, then what they reach.
+    assert pipeline["function_ids"] == [
+        "wide.flow.main",
+        *(f"wide.flow.step_{index:02d}" for index in range(30)),
+        "wide.flow.finish",
     ]
+    assert pipeline["edge_count"] == 60
+    assert pipeline["summary"] == "Atlas reaches 32 functions from wide.flow.main."
+
+
+def test_exported_roots_lead_the_pipelines(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("from pkg.api import load\n\n__all__ = ['load']\n", encoding="utf-8")
+    (package / "api.py").write_text("def load():\n    return _read()\n\n\ndef _read():\n    return 1\n", encoding="utf-8")
+    (package / "cli.py").write_text(
+        "def main():\n    return one() + two()\n\n\ndef one():\n    return 1\n\n\ndef two():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    architecture = analyze_path(tmp_path)["architecture"]
+    functions = {function["id"]: function for function in architecture["functions"]}
+
+    # main would lead by name and reach; the exported load leads instead.
+    assert [pipeline["root"] for pipeline in architecture["pipelines"]] == ["pkg.api.load", "pkg.cli.main"]
+    assert functions["pkg.api.load"]["exported_from"] == ["pkg"]
+    assert not functions["pkg.cli.main"]["exported"]
 
 
 def test_vault_keeps_test_functions_without_claiming_they_are_on_the_map(tmp_path):
@@ -65,7 +99,7 @@ def test_snapshot_id_is_stable_when_analysis_facts_do_not_change():
     assert analyze_path(source)["snapshot_id"] == analyze_path(source)["snapshot_id"]
 
 
-def test_snapshot_id_changes_when_use_case_documentation_changes(tmp_path):
+def test_snapshot_id_ignores_documentation_changes(tmp_path):
     target = tmp_path / "simple_package"
     shutil.copytree(FIXTURES / "simple_package", target)
 
@@ -73,105 +107,7 @@ def test_snapshot_id_changes_when_use_case_documentation_changes(tmp_path):
     document = target / "docs" / "basic_workflow.md"
     document.write_text("# Different workflow\n\nCall `helper()` instead.\n", encoding="utf-8")
 
-    assert analyze_path(target)["snapshot_id"] != before
-
-
-def test_use_cases_ignore_cached_and_hidden_example_artifacts(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    examples = target / "examples"
-    (examples / "workflow.py").write_text("print('run')\n", encoding="utf-8")
-    (target / "docs" / "workflow.md").write_text("# Workflow\n\nCall `main()`.\n", encoding="utf-8")
-    cache = examples / "__pycache__"
-    cache.mkdir()
-    (cache / "workflow.cpython-314.pyc").write_bytes(b"cache")
-    (examples / ".DS_Store").write_bytes(b"metadata")
-
-    paths = [item["path"] for item in analyze_path(target)["architecture"]["use_cases"]]
-
-    assert "docs/workflow.md" in paths
-    assert "examples/workflow.py" not in paths
-    assert not any("__pycache__" in path or ".DS_Store" in path for path in paths)
-
-
-def test_use_cases_skip_a_symlinked_documentation_directory(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    external_docs = tmp_path / "external-docs"
-    external_docs.mkdir()
-    (external_docs / "basic_workflow.md").write_text(
-        "# External workflow\n\nCall `main()`.\n",
-        encoding="utf-8",
-    )
-    shutil.rmtree(target / "docs")
-    (target / "docs").symlink_to(external_docs, target_is_directory=True)
-
-    assert analyze_path(target)["architecture"]["use_cases"] == []
-
-
-def test_use_cases_skip_a_symlinked_example_file(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    external_example = tmp_path / "basic_workflow.gds"
-    external_example.write_text("external fixture\n", encoding="utf-8")
-    example = target / "examples" / "basic_workflow.gds"
-    example.unlink()
-    example.symlink_to(external_example)
-
-    assert analyze_path(target)["architecture"]["use_cases"] == []
-
-
-def test_external_workflow_directory_skips_symlinked_descendants(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    workflow = tmp_path / "workflow"
-    workflow.mkdir()
-    external_example = tmp_path / "basic_workflow.gds"
-    external_example.write_text("external fixture\n", encoding="utf-8")
-    (workflow / "basic_workflow.gds").symlink_to(external_example)
-
-    architecture = analyze_path(target, workflow_path=workflow)["architecture"]
-
-    assert architecture["use_cases"] == []
-
-
-def test_documentation_links_only_unambiguous_function_names(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    (target / "simple_pkg" / "duplicate.py").write_text(
-        "def helper():\n    return 2\n",
-        encoding="utf-8",
-    )
-    (target / "docs" / "ambiguous.md").write_text(
-        "# Ambiguous helper\n\nCall `helper()` from a workflow.\n",
-        encoding="utf-8",
-    )
-    (target / "examples" / "ambiguous.gds").write_text("fixture", encoding="utf-8")
-
-    use_case = next(
-        item
-        for item in analyze_path(target)["architecture"]["use_cases"]
-        if item["path"] == "docs/ambiguous.md"
-    )
-
-    assert use_case["function_ids"] == []
-
-
-def test_documentation_classifies_pages_under_docs_guides_as_guides(tmp_path):
-    target = tmp_path / "simple_package"
-    shutil.copytree(FIXTURES / "simple_package", target)
-    guides = target / "docs" / "guides"
-    guides.mkdir()
-    (guides / "run.md").write_text("# Run guide\n\nCall `main()`.\n", encoding="utf-8")
-    (target / "examples" / "run.gds").write_text("fixture", encoding="utf-8")
-
-    use_case = next(
-        item
-        for item in analyze_path(target)["architecture"]["use_cases"]
-        if item["path"] == "docs/guides/run.md"
-    )
-
-    assert use_case["kind"] == "guide"
+    assert analyze_path(target)["snapshot_id"] == before
 
 
 def test_vault_writes_function_notes_and_preserves_human_directories(tmp_path):
@@ -190,9 +126,7 @@ def test_vault_writes_function_notes_and_preserves_human_directories(tmp_path):
     assert "Run the simple pipeline." in content
     assert "simple_pkg.a.helper" in content
     assert "simple_pkg.b.beta" in content
-
-    use_cases = list((vault / "00-atlas" / "Use-cases").glob("*.md"))
-    assert any("Basic workflow" in note.read_text(encoding="utf-8") for note in use_cases)
+    assert not (vault / "00-atlas" / "Use-cases").exists()
 
     accepted = vault / "10-functionality" / "accepted.md"
     accepted.write_text("# Kept by a human\n", encoding="utf-8")

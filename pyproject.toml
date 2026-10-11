@@ -31,10 +31,10 @@ atlas = "atlas.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-atlas = ["explorer/static/**/*"]
+atlas = ["dashboard/static/**/*", "explorer/static/**/*"]
 
 [tool.setuptools.data-files]
-"share/atlas/schema" = ["schema/atlas.schema.json"]
+"share/atlas/schema" = ["schema/atlas.schema.json", "schema/atlas-story.schema.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -48,6 +48,7 @@ platforms = ["osx-arm64", "linux-64"]
 [tool.pixi.dependencies]
 python = ">=3.9"
 pytest = ">=8.0"
+jsonschema = ">=4.18,<5"
 
 [tool.pixi.pypi-dependencies]
 atlas = { path = ".", editable = true }
@@ -55,4 +56,5 @@ atlas = { path = ".", editable = true }
 [tool.pixi.tasks]
 test = "python -B -m pytest"
 explore = "python -B -m atlas explore --where ."
+dashboard = "python -B -m atlas dashboard"
 smoke = "python -B -m atlas explore --where tests/fixtures/simple_package"

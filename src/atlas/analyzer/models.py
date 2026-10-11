@@ -54,6 +54,9 @@ class ImportInfo:
     level: int
     kind: str
     line: int
+    # The local function or class a ``from`` import binds, through package
+    # re-exports; set by ``resolve_import_symbols``.
+    symbol: str | None = None
 
 
 @dataclass

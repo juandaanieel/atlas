@@ -74,3 +74,53 @@ def test_tree_rolls_up_defects():
     core = find(tree, "core")
     assert core is not None and core["type"] == "module"
     assert "defect_pkg.core._unused_private" in core["function_ids"]
+
+
+def test_exports_follow_all_and_package_reexports():
+    snapshot = analyze_path(FIXTURES / "export_package")
+    nodes = {node["id"]: node for node in snapshot["model"]["nodes"]}
+
+    assert {node_id: node["exported_from"] for node_id, node in nodes.items() if node["exported"]} == {
+        "export_pkg.engine.Engine.__init__": ["export_pkg"],
+        "export_pkg.engine.Engine.run": ["export_pkg"],
+        "export_pkg.engine.build": ["export_pkg"],
+        "export_pkg.shapes.box.Box.scaled": ["export_pkg.shapes"],
+        "export_pkg.shapes.box.area": ["export_pkg.shapes"],
+    }
+    # __all__ leaves out the re-exported tune; the private _vendor package exports nothing.
+    assert nodes["export_pkg.engine.tune"]["exported_from"] == []
+    assert not nodes["export_pkg._compile.compile_inputs"]["exported"]
+    assert {item["id"]: item["exported"] for item in snapshot["objects"]} == {
+        "export_pkg.engine.Engine": True,
+        "export_pkg.shapes.box.Box": True,
+    }
+
+
+def test_exports_leave_roots_and_dead_code_unchanged():
+    model = _model("export_package")
+    by_id = {node["id"]: node for node in model["nodes"]}
+
+    assert by_id["export_pkg.engine.build"]["exported"] and not by_id["export_pkg.engine.build"]["is_root"]
+    assert sorted(node["id"] for node in model["nodes"] if node["dead"]) == [
+        "export_pkg.engine.Engine._check",
+        "export_pkg.shapes.box._hidden",
+    ]
+
+
+def test_package_without_all_exports_its_public_bindings(tmp_path):
+    files = {
+        "pkg/__init__.py": "from .core import _secret, run\n\n\ndef version():\n    return 1\n",
+        "pkg/core.py": "def run():\n    return _secret()\n\n\ndef _secret():\n    return 1\n",
+        "pkg/extra/__init__.py": "from pkg.core import run\n\n__all__: list = []\n__all__ += ['run']\n",
+    }
+    for relative, text in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    nodes = analyze_path(tmp_path)["model"]["nodes"]
+
+    assert {node["id"]: node["exported_from"] for node in nodes if node["exported"]} == {
+        "pkg.core.run": ["pkg", "pkg.extra"],
+        "pkg.version": ["pkg"],
+    }

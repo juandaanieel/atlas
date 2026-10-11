@@ -2,27 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas import __version__
-from atlas.architecture import build_architecture, documentation_digest
-from atlas.citymap import build_citymap
+from atlas.architecture import build_architecture
 from atlas.functionalities import (
     functionality_digest,
     functionality_issues,
     load_functionalities,
 )
-from atlas.analyzer.calls import build_calls
+from atlas.analyzer.calls import build_calls, package_exports, resolve_import_symbols
 from atlas.analyzer.classify import MANY_OUTGOING_CALLS, warning_message
 from atlas.analyzer.discovery import (
+    discover_directories,
     discover_python_files,
     resolve_analysis_root,
-    resolve_workflow_path,
 )
 from atlas.analyzer.imports import find_circular_imports
 from atlas.analyzer.model import build_model
 from atlas.analyzer.models import CallInfo, SymbolInfo, WarningInfo, to_dict
+from atlas.analyzer.objects import assign_onion_rings
 from atlas.analyzer.parser import ParsedFile, parse_python_file
 from atlas.analyzer.snapshot import AnalysisSnapshot, SNAPSHOT_VERSION
 from atlas.output import checked_output_path, ensure_output_dir
@@ -31,7 +32,6 @@ from atlas.output import checked_output_path, ensure_output_dir
 def analyze_path(
     path: str | Path,
     vault_dir: str | Path | None = None,
-    workflow_path: str | Path | None = None,
 ) -> AnalysisSnapshot:
     root = resolve_analysis_root(path)
     requested_vault_dir = Path(vault_dir).expanduser().absolute() if vault_dir else None
@@ -42,12 +42,13 @@ def analyze_path(
     if uses_default_vault and (root / ".atlas").is_symlink():
         raise ValueError(f"Refusing to read symlinked Atlas output: {root / '.atlas'}")
     resolved_vault_dir = requested_vault_dir.resolve() if requested_vault_dir else None
-    resolved_workflow_path = resolve_workflow_path(workflow_path) if workflow_path else None
     parsed_files = [parse_python_file(root, rel_path) for rel_path in discover_python_files(root)]
     symbols = [symbol for parsed in parsed_files for symbol in parsed.symbols]
     objects = [item for parsed in parsed_files for item in parsed.objects]
     imports = [item for parsed in parsed_files for item in parsed.imports]
     calls = build_calls(parsed_files, symbols)
+    resolve_import_symbols(parsed_files, symbols)
+    exports = package_exports(parsed_files, symbols)
 
     callable_ids = {
         symbol.id
@@ -66,28 +67,33 @@ def analyze_path(
     files = [parsed.file for parsed in parsed_files]
     package_name = _package_name(root, parsed_files)
     file_dicts = to_dict(files)
+    directories = discover_directories(root)
     symbol_dicts = to_dict(symbols)
     call_dicts = to_dict(calls)
+    object_dicts = to_dict(objects)
+    assign_onion_rings(object_dicts, call_dicts)
+    for item in object_dicts:
+        item["exported"] = item["id"] in exports
+        item["exported_from"] = exports.get(item["id"], [])
     import_dicts = to_dict(imports)
     warning_dicts = to_dict(warnings)
-    model = build_model(file_dicts, symbol_dicts, call_dicts, import_dicts, package_name)
-    citymap = build_citymap(
-        root,
-        files=file_dicts,
-        symbols=symbol_dicts,
-        calls=call_dicts,
-        warnings=warning_dicts,
-        model=model,
-        functionalities=functionalities,
+    model = build_model(
+        file_dicts,
+        symbol_dicts,
+        call_dicts,
+        import_dicts,
+        package_name,
+        object_dicts,
+        circular_imports,
+        exports,
     )
     snapshot_id = _snapshot_id(
+        directories,
         file_dicts,
         symbol_dicts,
         call_dicts,
         import_dicts,
         model,
-        citymap,
-        documentation_digest(root, resolved_workflow_path),
         functionality_digest(root, resolved_vault_dir),
     )
     architecture = build_architecture(
@@ -99,7 +105,6 @@ def analyze_path(
         snapshot_id,
         resolved_vault_dir,
         functionalities,
-        resolved_workflow_path,
     )
     return AnalysisSnapshot.from_dict(
         {
@@ -109,18 +114,110 @@ def analyze_path(
             "root": str(root),
             "package_name": package_name,
             "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "directories": directories,
             "files": file_dicts,
             "symbols": symbol_dicts,
-            "objects": to_dict(objects),
+            "objects": object_dicts,
             "calls": call_dicts,
             "imports": import_dicts,
             "warnings": warning_dicts,
             "model": model,
             "overview": _overview(files, symbols, calls, circular_imports, model),
             "architecture": architecture,
-            "citymap": citymap,
+            "git": _git_status(root),
         }
     )
+
+
+def _git_status(root: Path) -> dict:
+    """Return Git state for files inside the analyzed project root."""
+    repository = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if repository.returncode != 0:
+        return {
+            "available": False,
+            "branch": None,
+            "revision": None,
+            "dirty": False,
+            "counts": {"changed": 0, "staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0},
+            "files": [],
+        }
+
+    branch_result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    revision_result = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status_result = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+            "--",
+            ".",
+        ],
+        cwd=root,
+        capture_output=True,
+        check=True,
+    )
+
+    conflicts = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+    files = []
+    for record in status_result.stdout.decode("utf-8", errors="replace").split("\0"):
+        if not record:
+            continue
+        code = record[:2]
+        path = record[3:].replace("\\", "/")
+        if path == ".atlas" or path.startswith(".atlas/"):
+            continue
+        untracked = code == "??"
+        conflicted = code in conflicts
+        staged = not untracked and code[0] not in {" ", "?"}
+        unstaged = not untracked and code[1] not in {" ", "?"}
+        status = "conflicted" if conflicted else "untracked" if untracked else "modified" if unstaged else "staged"
+        files.append(
+            {
+                "path": path,
+                "status": status,
+                "staged": staged,
+                "unstaged": unstaged,
+                "untracked": untracked,
+                "conflicted": conflicted,
+            }
+        )
+
+    counts = {
+        "changed": len(files),
+        "staged": sum(file["staged"] for file in files),
+        "unstaged": sum(file["unstaged"] for file in files),
+        "untracked": sum(file["untracked"] for file in files),
+        "conflicted": sum(file["conflicted"] for file in files),
+    }
+    return {
+        "available": True,
+        "branch": branch_result.stdout.strip() or None,
+        "revision": revision_result.stdout.strip() or None,
+        "dirty": bool(files),
+        "counts": counts,
+        "files": sorted(files, key=lambda file: file["path"]),
+    }
 
 
 def write_payload(path: str | Path, snapshot: AnalysisSnapshot | None = None) -> Path:
@@ -259,24 +356,22 @@ def _package_name(root: Path, parsed_files: list[ParsedFile]) -> str:
 
 
 def _snapshot_id(
+    directories: list[str],
     files: list[dict],
     symbols: list[dict],
     calls: list[dict],
     imports: list[dict],
     model: dict,
-    citymap: dict,
-    documentation: str,
     functionalities: str,
 ) -> str:
     """Hash stable analysis facts without host paths or generation timestamps."""
     stable = {
+        "directories": directories,
         "files": files,
         "symbols": symbols,
         "calls": calls,
         "imports": imports,
         "model": model,
-        "citymap": citymap,
-        "documentation": documentation,
         "functionalities": functionalities,
     }
     encoded = json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -18,7 +18,8 @@ def test_snapshot_serializes_and_round_trips_as_the_same_contract(tmp_path):
 
     assert json.loads(encoded) == snapshot.to_dict()
     assert decoded.to_dict() == snapshot.to_dict()
-    assert decoded["snapshot_version"] == 2
+    assert decoded["snapshot_version"] == 8
+    assert "simple_pkg" in decoded["directories"]
 
 
 def test_snapshot_is_read_only_through_mapping_access():
@@ -28,6 +29,17 @@ def test_snapshot_is_read_only_through_mapping_access():
     files.clear()
 
     assert snapshot["files"]
+
+
+def test_snapshot_records_empty_source_directories(tmp_path):
+    package = tmp_path / "src" / "sample"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "workflows").mkdir()
+
+    snapshot = analyze_path(tmp_path)
+
+    assert "src/sample/workflows" in snapshot["directories"]
 
 
 def test_payload_writes_and_loads_the_snapshot_contract(tmp_path):
@@ -71,6 +83,6 @@ def test_snapshot_rejects_missing_or_unknown_versions():
         AnalysisSnapshot.from_dict({})
 
     document = analyze_path(FIXTURES / "simple_package").to_dict()
-    document["snapshot_version"] = 3
+    document["snapshot_version"] = 2
     with pytest.raises(ValueError, match="Unsupported Atlas snapshot version"):
         AnalysisSnapshot.from_dict(document)

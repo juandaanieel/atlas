@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import Any
 
 
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 8
 
 _REQUIRED_KEYS = {
     "atlas_version",
@@ -16,6 +16,7 @@ _REQUIRED_KEYS = {
     "root",
     "package_name",
     "generated_at",
+    "directories",
     "files",
     "symbols",
     "objects",
@@ -25,10 +26,10 @@ _REQUIRED_KEYS = {
     "model",
     "overview",
     "architecture",
-    "citymap",
+    "git",
 }
-_LIST_KEYS = {"files", "symbols", "objects", "calls", "imports", "warnings"}
-_MAPPING_KEYS = {"model", "overview", "architecture", "citymap"}
+_LIST_KEYS = {"directories", "files", "symbols", "objects", "calls", "imports", "warnings"}
+_MAPPING_KEYS = {"model", "overview", "architecture", "git"}
 
 
 @dataclass(frozen=True)

@@ -6,47 +6,49 @@ import shutil
 from pathlib import Path
 
 from atlas.analyzer.snapshot import AnalysisSnapshot
+from atlas.explorer.view import build_view
 from atlas.output import checked_output_path, ensure_output_subdir
+from atlas.story import build_story, validate_story
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+ASSETS = ("styles.css", "app.bundle.js", "app.bundle.js.LEGAL.txt", "THREE-LICENSE.txt")
 
 
-def write_explorer(root: str | Path, snapshot: AnalysisSnapshot) -> Path:
+def write_explorer(
+    root: str | Path,
+    snapshot: AnalysisSnapshot,
+    story: dict | None = None,
+) -> Path:
     output_dir = ensure_output_subdir(root, "explorer")
     assets_dir = checked_output_path(output_dir, "assets")
-    styles_path = STATIC_DIR / "styles.css"
-    core_path = STATIC_DIR / "src" / "core.js"
-    app_path = STATIC_DIR / "src" / "app.js"
-
     if assets_dir.exists():
         shutil.rmtree(assets_dir)
-    shutil.copytree(STATIC_DIR / "src", assets_dir / "src")
-    shutil.copy2(styles_path, assets_dir / "styles.css")
-
-    template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    template = (
-        template
-        .replace("__ATLAS_STYLES_VERSION__", _asset_version(styles_path))
-        .replace("__ATLAS_CORE_VERSION__", _asset_version(core_path))
-        .replace("__ATLAS_APP_VERSION__", _asset_version(app_path))
-    )
-    html = template.replace("__ATLAS_PAYLOAD__", _script_safe_json(snapshot))
+    assets_dir.mkdir()
+    for name in ASSETS:
+        shutil.copy2(STATIC_DIR / name, assets_dir / name)
     output_path = checked_output_path(output_dir, "index.html")
-    output_path.write_text(html, encoding="utf-8")
+    output_path.write_text(render_explorer(snapshot, story), encoding="utf-8")
     return output_path
 
 
-def _asset_version(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+def render_explorer(snapshot: AnalysisSnapshot, story: dict | None = None) -> str:
+    """Use the same offline renderer for static exports and the local dashboard."""
+    if story is None:
+        story = build_story(snapshot)
+    validate_story(story, snapshot)
+    document = build_view(snapshot.to_dict(), story)
+    template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for marker, filename in (("STYLES", "styles.css"), ("APP", "app.bundle.js")):
+        version = hashlib.sha256((STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
+        template = template.replace(f"__ATLAS_{marker}_VERSION__", version)
+    return template.replace("__ATLAS_VIEW__", _script_safe_json(document))
 
 
-def _script_safe_json(snapshot: AnalysisSnapshot) -> str:
+def _script_safe_json(document: dict) -> str:
     """Escape HTML-significant characters before placing JSON in a script."""
-    document = snapshot.to_dict()
-    document.pop("citymap")
     return (
-        json.dumps(document, sort_keys=True)
+        json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False)
         .replace("&", "\\u0026")
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")

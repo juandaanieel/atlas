@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+  --atlas-bar-height: 44px;
+}
+
+body {
+  background: #0b1016;
+  color: #e8edf2;
+}
+
+.atlas-project-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: var(--atlas-bar-height);
+  padding: 0 12px;
+  border-bottom: 1px solid #2a3643;
+  background: #0d141c;
+  color: #94a1ae;
+  font: 11px/1.4 "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+}
+
+.atlas-project-home {
+  color: #78aff6;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.atlas-project-bar label { color: #667584; }
+.atlas-project-bar select { min-width: 190px; min-height: 28px; }
+.atlas-project-bar button { min-height: 28px; margin-left: auto; }
+#atlasProjectStatus {
+  overflow: hidden;
+  color: #7f8d9b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-dashboard-project #frame {
+  top: var(--atlas-bar-height);
+  height: calc(100% - var(--atlas-bar-height));
+}
+
+.project-unavailable {
+  max-width: 680px;
+  margin: 14vh auto 0;
+  padding: 0 24px;
+  font: 15px/1.55 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.project-unavailable-kicker {
+  color: #78aff6;
+  font: 11px/1.4 "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.project-unavailable h1 {
+  margin: 12px 0 15px;
+  font-size: clamp(38px, 7vw, 72px);
+  letter-spacing: -0.05em;
+}
+.project-unavailable p { color: #96a3b0; }
+.project-unavailable button {
+  margin-top: 14px;
+  padding: 9px 15px;
+  border: 1px solid #314152;
+  border-radius: 4px;
+  background: #17222d;
+  color: #e8edf2;
+}
+
+@media (max-width: 720px) {
+  .atlas-project-bar label, #atlasProjectStatus { display: none; }
+  .atlas-project-bar select { min-width: 0; max-width: 45vw; }
+}

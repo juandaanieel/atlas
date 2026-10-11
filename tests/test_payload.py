@@ -1,5 +1,9 @@
 from pathlib import Path
+import subprocess
 
+from atlas.analyzer.calls import resolve_import_symbols
+from atlas.analyzer.discovery import discover_python_files
+from atlas.analyzer.parser import parse_python_file
 from atlas.analyzer.payload import analyze_path
 
 
@@ -33,6 +37,31 @@ def test_payload_detects_circular_imports():
 
     assert payload["overview"]["circular_import_count"] == 1
     assert payload["overview"]["circular_imports"][0][0] == "circular_pkg.a"
+
+
+def test_payload_records_git_status_for_the_analyzed_root(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    tracked = tmp_path / "tracked.py"
+    tracked.write_text("def first():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    tracked.write_text("def first():\n    return 2\n", encoding="utf-8")
+    (tmp_path / "untracked.py").write_text("def second():\n    return 2\n", encoding="utf-8")
+
+    git = analyze_path(tmp_path)["git"]
+    by_path = {file["path"]: file for file in git["files"]}
+
+    assert git["available"] is True
+    assert git["dirty"] is True
+    assert git["counts"] == {
+        "changed": 2,
+        "staged": 1,
+        "unstaged": 1,
+        "untracked": 1,
+        "conflicted": 0,
+    }
+    assert by_path["tracked.py"]["status"] == "modified"
+    assert by_path["tracked.py"]["staged"] is True
+    assert by_path["untracked.py"]["status"] == "untracked"
 
 
 def test_calls_respect_callable_scope_and_python_method_lookup(tmp_path):
@@ -171,10 +200,13 @@ def make():
     assert calls[("sample.main.rebound", "sample.tools.imported")]["kind"] == "unresolved"
     assert calls[("sample.main.Worker.run", "task")]["kind"] == "unresolved"
     assert calls[("sample.main.make", "Worker")]["target"] == "sample.main.Worker"
-    assert not any(
-        edge["source"] == "sample.main.make"
+    # Worker has no __init__ of its own, so the call map draws the construction
+    # into the class box rather than inventing a constructor to call.
+    assert [
+        (edge["target"], edge["kind"])
         for edge in payload["model"]["edges"]
-    )
+        if edge["source"] == "sample.main.make"
+    ] == [("sample.main.Worker", "constructs")]
 
     make = next(
         function
@@ -185,3 +217,88 @@ def make():
     symbols = {symbol["id"]: symbol for symbol in payload["symbols"]}
     assert symbols["sample.main.make"]["metrics"]["same_file_outgoing"] == 0
     assert symbols["sample.main.Worker"]["metrics"]["same_file_incoming"] == 0
+
+
+def test_calls_follow_package_reexports_into_implementation_modules(tmp_path):
+    package = tmp_path / "sample"
+    package.mkdir()
+    examples = tmp_path / "examples"
+    examples.mkdir()
+    (package / "__init__.py").write_text(
+        "from .api import public_run\n",
+        encoding="utf-8",
+    )
+    (package / "api.py").write_text(
+        "from .engine import run as public_run\n",
+        encoding="utf-8",
+    )
+    (package / "engine.py").write_text(
+        "def helper():\n    return 1\n\ndef run():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    (examples / "workflow.py").write_text(
+        "from sample import public_run\n\ndef main():\n    return public_run()\n",
+        encoding="utf-8",
+    )
+
+    payload = analyze_path(tmp_path)
+    calls = {
+        (call["source"], call["called_name"]): call
+        for call in payload["calls"]
+    }
+
+    workflow_call = calls[("examples.workflow.main", "public_run")]
+    assert workflow_call["target"] == "sample.engine.run"
+    assert workflow_call["kind"] == "cross_file"
+    assert calls[("sample.engine.run", "helper")]["target"] == "sample.engine.helper"
+
+
+def test_import_symbols_follow_package_reexports_to_the_definition(tmp_path):
+    package = tmp_path / "sample"
+    package.mkdir()
+    examples = tmp_path / "examples"
+    examples.mkdir()
+    (package / "__init__.py").write_text(
+        "from .api import public_run\nfrom . import engine\n",
+        encoding="utf-8",
+    )
+    (package / "api.py").write_text(
+        "import os\nfrom .engine import run as public_run\nfrom .engine import *\n",
+        encoding="utf-8",
+    )
+    (package / "engine.py").write_text(
+        "LIMIT = 3\n\nclass Job:\n    pass\n\ndef run():\n    return Job()\n",
+        encoding="utf-8",
+    )
+    (examples / "workflow.py").write_text(
+        "import sample.engine\n"
+        "from json import dumps\n"
+        "from sample import public_run\n"
+        "from sample.api import public_run as again\n"
+        "from sample.engine import LIMIT, Job\n",
+        encoding="utf-8",
+    )
+    parsed_files = [parse_python_file(tmp_path, path) for path in discover_python_files(tmp_path)]
+
+    resolve_import_symbols(parsed_files, [symbol for parsed in parsed_files for symbol in parsed.symbols])
+
+    symbols = {
+        (info.module, info.name, info.alias): info.symbol
+        for parsed in parsed_files
+        for info in parsed.imports
+    }
+    assert symbols == {
+        # Through the package and then the api module to the definition.
+        ("sample", "public_run", None): "sample.engine.run",
+        ("examples.workflow", "public_run", None): "sample.engine.run",
+        ("examples.workflow", "public_run", "again"): "sample.engine.run",
+        ("sample.api", "run", "public_run"): "sample.engine.run",
+        ("examples.workflow", "Job", None): "sample.engine.Job",
+        # Modules, star imports, external names, and plain values bind no definition.
+        ("sample", "engine", None): None,
+        ("sample.api", "os", None): None,
+        ("sample.api", "*", None): None,
+        ("examples.workflow", "sample.engine", None): None,
+        ("examples.workflow", "dumps", None): None,
+        ("examples.workflow", "LIMIT", None): None,
+    }

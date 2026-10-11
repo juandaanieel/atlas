@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 
+from atlas.analyzer.imports import resolve_from_base
+from atlas.analyzer.layout import box_members, build_layout, class_boxes, edge_kind, rank_live
+
 # A clone group is only reported when each member has at least this many
 # structural nodes, so trivial one-liners do not register as duplicates.
 MIN_CLONE_SIZE = 14
@@ -38,12 +41,15 @@ _LAYER_TOKENS = [
 ]
 
 
-def build_model(files, symbols, calls, imports, package_name):
+def build_model(files, symbols, calls, imports, package_name, objects, circular_imports, exports):
     """Assemble the comprehension model from raw analysis facts.
 
     This is the only place graph semantics are decided. Diagrams, the report,
     and the explorer all render this structure rather than recomputing it, so
     there is a single source of truth and no chance of the views disagreeing.
+    ``exports`` maps each exported symbol to the packages exporting it
+    (``package_exports``); it is a parallel fact and decides no root,
+    reachability or dead code.
     """
     callables = [
         symbol
@@ -57,22 +63,47 @@ def build_model(files, symbols, calls, imports, package_name):
     roots = _roots(callables, in_edges)
     reachable = _reachable_from(roots, out_edges)
 
-    nodes = _classify_nodes(callables, roots, reachable, in_edges, out_edges, unresolved_out)
+    nodes = _classify_nodes(
+        callables, roots, reachable, in_edges, out_edges, unresolved_out, exports
+    )
 
     clones = _clone_groups(callables)
     layer_edges, violations = _layer_relations(files, imports, calls, by_id)
 
+    test_modules = {file["module"] for file in files if file["is_test"]}
+    boxes = class_boxes(objects, nodes, test_modules)
+    class_modules = {box["module"] for box in boxes.values()}
+    tree = build_tree(nodes, package_name, clones, class_modules)
+    rank, back_edges = rank_live(nodes, out_edges, roots)
+    module_of = {node["id"]: node["module"] for node in nodes}
+    constructed = _construction_edges(calls, callable_ids, boxes)
+    edges = _edge_records(out_edges, constructed, reachable, back_edges, module_of, boxes)
+    # The modules build_tree admits, which are exactly the layout columns.
+    column_modules = set(module_of.values()) | class_modules
+    layout = build_layout(
+        nodes,
+        edges,
+        rank,
+        tree,
+        boxes,
+        {file["module"]: infer_layer(file) for file in files},
+        clones,
+        _import_pairs(files, symbols, imports, column_modules, circular_imports),
+        circular_imports,
+    )
+
     return {
         "package_name": package_name,
         "nodes": nodes,
-        "edges": _edge_records(out_edges, reachable),
+        "edges": edges,
         "roots": sorted(roots),
         "clones": clones,
-        "tree": build_tree(nodes, package_name, clones),
+        "tree": tree,
         "wrappers": sorted(node["id"] for node in nodes if by_id[node["id"]]["is_wrapper"]),
         "layers": _layer_summary(files, layer_edges),
         "layer_violations": violations,
         "summary": _summary(nodes, clones, violations),
+        "layout": layout,
     }
 
 
@@ -100,12 +131,19 @@ def _roots(callables, in_edges):
     Name-based entrypoints (main/run/cli/app) always count. Beyond those, any
     public callable with no resolved caller is an API entry. Private helpers
     are never roots, so an uncalled private helper falls out as dead code.
+    A constructor's callers inside its own class do not count: a class that
+    only builds instances of itself is still entered from outside, so a
+    recursive structure such as ``__init__ -> _grow -> Cls(...)`` stays live.
     """
+    class_of = {symbol["id"]: symbol["class_id"] for symbol in callables}
     roots: set[str] = set()
     for symbol in callables:
         if symbol["is_private"]:
             continue
-        if symbol["is_entrypoint"] or not in_edges.get(symbol["id"]):
+        callers = in_edges.get(symbol["id"], set())
+        if symbol["kind"] == "method" and symbol["name"] == "__init__":
+            callers = {caller for caller in callers if class_of[caller] != symbol["class_id"]}
+        if symbol["is_entrypoint"] or not callers:
             roots.add(symbol["id"])
     return roots
 
@@ -122,7 +160,7 @@ def _reachable_from(roots, out_edges):
     return reachable
 
 
-def _classify_nodes(callables, roots, reachable, in_edges, out_edges, unresolved_out):
+def _classify_nodes(callables, roots, reachable, in_edges, out_edges, unresolved_out, exports):
     nodes = []
     for symbol in callables:
         sid = symbol["id"]
@@ -138,6 +176,8 @@ def _classify_nodes(callables, roots, reachable, in_edges, out_edges, unresolved
                 "qualified_name": symbol["qualified_name"],
                 "kind": symbol["kind"],
                 "is_private": symbol["is_private"],
+                "exported": sid in exports,
+                "exported_from": exports.get(sid, []),
                 "module": symbol["module"],
                 "file_id": symbol["file_id"],
                 "line_start": symbol["line_start"],
@@ -167,21 +207,52 @@ def _status(sid, roots, is_reachable):
     return "live"
 
 
-def _edge_records(out_edges, reachable):
+def _construction_edges(calls, callable_ids, boxes):
+    """Calls that build a class whose constructor Atlas has not analysed.
+
+    ``build_calls`` already aims ``Cls(...)`` at ``Cls.__init__`` when the
+    class defines one, so that construction is an ordinary call edge
+    (``into_class``, or ``intra_class`` from the class's own methods). A call
+    that still targets a class runs generated or inherited construction code
+    (a dataclass, a base class's ``__init__``). It becomes an edge to the class
+    itself only when the class has a box to draw; otherwise it stays in
+    ``calls`` alone. These edges count toward no fan-in, fan-out, root, rank,
+    or reachability: a class is not a callable, so nothing lies behind it.
+    """
+    constructed: dict[str, set[str]] = defaultdict(set)
+    for call in calls:
+        if call["source"] in callable_ids and call["target"] in boxes:
+            constructed[call["source"]].add(call["target"])
+    return constructed
+
+
+def _edge_records(out_edges, constructed, reachable, back_edges, module_of, boxes):
+    """One record per call edge and per construction edge, sorted by ids.
+
+    A construction edge is reachable when its caller is, and never a back
+    edge, since a class box is neither a root nor on any call cycle.
+    """
+    box_of = box_members(boxes)
+    targets: dict[str, set[str]] = defaultdict(set)
+    for links in (out_edges, constructed):
+        for source, callees in links.items():
+            targets[source] |= callees
     records = []
-    for source in sorted(out_edges):
-        for target in sorted(out_edges[source]):
+    for source in sorted(targets):
+        for target in sorted(targets[source]):
             records.append(
                 {
                     "source": source,
                     "target": target,
-                    "reachable": source in reachable and target in reachable,
+                    "reachable": source in reachable and (target in reachable or target in boxes),
+                    "kind": edge_kind(source, target, module_of, box_of, boxes),
+                    "back": (source, target) in back_edges,
                 }
             )
     return records
 
 
-def build_tree(nodes, package_name, clones):
+def build_tree(nodes, package_name, clones, class_modules=()):
     """A package/module trie with defect counts rolled up to every level.
 
     This is the navigation spine of the explorer: the reader expands a package,
@@ -189,6 +260,8 @@ def build_tree(nodes, package_name, clones):
     then scoped to whatever the reader selected, so it never renders the whole
     repository at once. Rollups are summed from the per-function classifications
     the analyzer already decided, so the tree cannot disagree with the graph.
+    Modules that only define classes are admitted too, with empty rollups, so
+    every class box has a module column.
     """
     cloned_ids = {member for group in clones for member in group["members"]}
     funcs_by_module: dict[str, list[dict]] = defaultdict(list)
@@ -197,7 +270,7 @@ def build_tree(nodes, package_name, clones):
 
     root = {"name": package_name, "path": "", "module": None, "children": {}}
 
-    for module in sorted(funcs_by_module):
+    for module in sorted(set(funcs_by_module) | set(class_modules)):
         cursor = root
         parts = module.split(".")
         for index, part in enumerate(parts):
@@ -262,8 +335,6 @@ def _layer_relations(files, imports, calls, by_id):
     local_modules = set(layer_by_module)
     edges: dict[tuple[str, str], int] = defaultdict(int)
 
-    from atlas.analyzer.imports import resolve_from_base
-
     for item in imports:
         if item["module"] not in local_modules:
             continue
@@ -295,6 +366,38 @@ def _layer_relations(files, imports, calls, by_id):
             violations.append({"layers": [source_layer, target_layer]})
 
     return layer_edges, sorted(violations, key=lambda item: item["layers"])
+
+
+def _import_pairs(files, symbols, imports, column_modules, circular_imports):
+    """Every resolved local import as a sorted, deduplicated module pair.
+
+    The imported module is resolved as in ``find_circular_imports``. When a
+    ``from`` import binds a function or class defined in a different module
+    (``symbol``: the name is re-exported, typically by a package
+    ``__init__``), the pair points at the defining module instead, because
+    the package usually has no column to draw. The pair to the imported
+    module is kept as well only when that module has a column, or when the
+    pair closes an import cycle, so every import-cycle pair is still an
+    import pair. Pairs with no column at either end are kept; the layout
+    names those modules in ``import_targets_without_column``.
+    """
+    local_modules = {file["module"] for file in files}
+    module_of_symbol = {symbol["id"]: symbol["module"] for symbol in symbols}
+    cycle_pairs = {pair for cycle in circular_imports for pair in zip(cycle, cycle[1:])}
+    pairs = set()
+    for item in imports:
+        source = item["module"]
+        if source not in local_modules:
+            continue
+        imported = _import_target(item, local_modules, resolve_from_base)
+        defining = module_of_symbol.get(item["symbol"])
+        targets = {imported}
+        if defining is not None and defining != imported:
+            targets = {defining}
+            if imported in column_modules or (source, imported) in cycle_pairs:
+                targets.add(imported)
+        pairs.update((source, target) for target in targets if target and target != source)
+    return [list(pair) for pair in sorted(pairs)]
 
 
 def _import_target(item, local_modules, resolve_from_base):

@@ -1,47 +1,70 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="Pragma" content="no-cache">
-    <meta http-equiv="Expires" content="0">
-    <title>Atlas Explorer</title>
-    <script>
-      (function () {
-        document.documentElement.setAttribute("data-theme", "dark");
-      })();
-    </script>
-    <link rel="stylesheet" href="assets/styles.css?v=__ATLAS_STYLES_VERSION__">
-  </head>
-  <body>
-    <script>
-      window.ATLAS_PAYLOAD = __ATLAS_PAYLOAD__;
-    </script>
-    <div class="shell">
-      <aside class="sidebar">
-        <div id="head" class="head"></div>
-        <nav id="sidebarTabs" class="sidebar-tabs" aria-label="Sidebar sections"></nav>
-        <nav id="views" class="views" aria-label="Pages"></nav>
-        <div id="tree" class="tree" hidden></div>
-        <section id="reviewPromptPanel" class="review-prompt-panel" aria-label="Review prompt" hidden></section>
-      </aside>
-      <main class="stage">
-        <div class="toolbar">
-          <nav id="history" class="history" aria-label="Navigation"></nav>
-          <div id="crumbs" class="crumbs"></div>
-          <div id="tools" class="tools"></div>
-        </div>
-        <section id="graphPromptComposer" class="graph-prompt-composer" aria-label="Graph prompt composer" hidden></section>
-        <section id="traceDock" class="trace-dock" aria-label="Static call trace" hidden></section>
-        <svg id="canvas" class="canvas" role="group" aria-label="Interactive scoped code graph" aria-describedby="hint"></svg>
-        <section id="tabContent" class="tab-content" hidden></section>
-        <div class="hint" id="hint"></div>
-      </main>
-      <div id="detailResize" class="detail-resize" role="separator" aria-label="Resize code panel" aria-orientation="vertical" tabindex="0" hidden></div>
-      <aside id="detail" class="detail-panel" aria-label="Code details" tabindex="-1" hidden></aside>
-    </div>
-    <script src="assets/src/core.js?v=__ATLAS_CORE_VERSION__"></script>
-    <script src="assets/src/app.js?v=__ATLAS_APP_VERSION__"></script>
-  </body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas Explorer</title>
+<link rel="stylesheet" href="assets/styles.css?v=__ATLAS_STYLES_VERSION__">
+<script>
+  // the theme before the first paint: ?theme=, then the reader's last choice, then the system
+  (() => {
+    let t = new URLSearchParams(location.search).get('theme');
+    try { if (t !== 'dark' && t !== 'light') t = localStorage.getItem('atlas.theme'); } catch (e) { t = null; }
+    if (t !== 'dark' && t !== 'light') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+</head>
+<body>
+<div id="frame">
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="labels"></canvas>
+</div>
+
+<header id="top" class="chrome">
+  <div class="brand">ATLAS<span class="sep">/</span><span id="pkg">…</span></div>
+  <nav id="crumbs"></nav>
+  <div id="modes">
+    <button id="mapBtn" title="The whole map (Esc in the guide)">Map</button>
+    <button id="keyBtn" title="Show or hide the key (k)">Key</button>
+    <button id="helpBtn" title="Keys (? or h)">?</button>
+    <button id="themeBtn" title="Light or dark theme (t)"><span class="ic">◐</span> <span class="tn">dark</span></button>
+  </div>
+  <div id="views">
+    <button data-view="axo" title="Axonometric overview (1)">Axonometric</button>
+    <button data-view="plan" title="Plan: modules and imports from above (2)">Plan</button>
+    <button data-view="elev" title="Elevation: the scope face-on (3)">Elevation</button>
+    <button id="projBtn" title="Orthographic or perspective Elevation (o)">Orthographic</button>
+  </div>
+</header>
+
+<!-- the reading path: one step at a time, the picture shows what the text talks about -->
+<aside id="guide" class="chrome"></aside>
+
+<!-- free exploration: the scope tree (pipelines are reached through the guide, an entry row
+     and the inspector's call sites) -->
+<aside id="side" class="chrome hidden">
+  <div class="h">Scope</div>
+  <div id="tree"></div>
+  <div class="hint">arrows move · + − zoom · Home fit · esc up a level<br>box: scope · header: unfold · row: select and read<br>u unfold · 1 2 3 views · o ortho · k key · t theme · ? keys</div>
+</aside>
+
+<aside id="inspector" class="chrome hidden"></aside>
+
+<section id="key" class="chrome hidden"></section>
+
+<section id="help" class="chrome hidden"></section>
+<!-- the legend: the marks on screen right now, each with a swatch that looks like it -->
+<section id="legend" class="chrome"></section>
+
+<nav id="rail" class="chrome"></nav>
+
+<div id="status" class="chrome">loading snapshot…</div>
+
+</div>
+
+<script id="atlasView" type="application/json">__ATLAS_VIEW__</script>
+<script defer src="assets/app.bundle.js?v=__ATLAS_APP_VERSION__"></script>
+</body>
 </html>

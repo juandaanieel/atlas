@@ -1,0 +1,16 @@
+{
+  "name": "atlas-explorer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/atlas/explorer/static/src/app.js --bundle --format=iife --minify --legal-comments=linked --outfile=src/atlas/explorer/static/app.bundle.js",
+    "test": "node --test tests/js/*.test.mjs",
+    "lint": "eslint src/atlas/explorer/static/src tests/js"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "eslint": "10.12.0",
+    "globals": "16.5.0",
+    "three": "0.185.0"
+  }
+}

@@ -74,7 +74,9 @@ def build_import_aliases(
     imports: list[ImportInfo],
     local_modules: set[str],
     symbol_ids: set[str],
+    exported_symbols: dict[str, str] | None = None,
 ) -> dict[str, dict[str, str | bool | None]]:
+    exported_symbols = exported_symbols or {}
     aliases: dict[str, dict[str, str | bool | None]] = {}
     for info in imports:
         if info.kind == "import":
@@ -98,7 +100,11 @@ def build_import_aliases(
         base = resolve_from_base(current_module, info.imported_module, info.level)
         full_name = f"{base}.{info.name}" if base and info.name != "*" else base
         local_module = full_name if full_name in local_modules else base if base in local_modules else None
-        local_symbol = full_name if full_name in symbol_ids else None
+        local_symbol = (
+            full_name
+            if full_name in symbol_ids
+            else exported_symbols.get(full_name)
+        )
         aliases[visible_name] = {
             "module": local_module or base,
             "symbol": local_symbol,
