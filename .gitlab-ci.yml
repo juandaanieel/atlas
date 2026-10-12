@@ -3,6 +3,7 @@ default:
     name: ghcr.io/prefix-dev/pixi:0.70.2
     entrypoint: [""]
   before_script:
+    - &install-git apt-get update && apt-get install -y --no-install-recommends git
     - pixi install --locked
 
 stages:
@@ -17,7 +18,8 @@ test:
 test-python-floor:
   stage: test
   image: python:3.11-slim
-  before_script: []
+  before_script:
+    - *install-git
   script:
     - python -m pip install --disable-pip-version-check -e ".[test]"
     - python -B -m pytest
@@ -26,6 +28,7 @@ explorer-javascript:
   stage: test
   image: node:22-slim
   before_script:
+    - *install-git
     - npm ci
   script:
     - npm run lint
@@ -36,7 +39,8 @@ explorer-javascript:
 distribution:
   stage: test
   image: python:3.13-slim
-  before_script: []
+  before_script:
+    - *install-git
   script:
     - python -m pip wheel --disable-pip-version-check --no-deps --wheel-dir dist .
     - python -m venv /tmp/atlas-wheel
