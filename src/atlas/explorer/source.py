@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 
-from atlas.analyzer.calls import dotted_name
+from atlas.analyzer.ast_names import dotted_name
 
 
 def call_positions(text: str, start: int) -> dict:
@@ -39,11 +39,49 @@ def call_positions(text: str, start: int) -> dict:
     return positions
 
 
-SOURCE_RULE = [
-    "a call site is linked when its call record resolves to a drawn call (one of view.edges); it is underlined and hovering it lights that call and its callee",
-    "external and unresolved call records are shown with a muted marker and no underline; recursive calls and calls to undrawn functions likewise",
-    "a class excerpt carries the call sites of all its methods",
-]
+def source_documentation(text: str) -> dict:
+    """Read the declared interface and full docstring without executing source.
+
+    ## Parameters
+    - `text`: a complete function, method, or class source excerpt. Method
+      indentation is preserved, including whitespace inside multiline strings.
+
+    ## Returns
+    A dictionary containing `signature` and `docstring`. Signatures retain
+    declared annotations and defaults; classes include an explicit `__init__`
+    when present. Missing docstrings are returned as an empty string.
+
+    ## Example
+    ```python
+    source = "def square(x: int) -> int: return x * x"
+    details = source_documentation(source)
+    print(details["signature"])
+    # def square(x: int) -> int
+    ```
+
+    Types and runtime-generated constructors are not inferred.
+    """
+    nested = text[0].isspace()
+    tree = ast.parse(("if True:\n" if nested else "") + text)
+    node = tree.body[0].body[0] if nested else tree.body[0]
+    declarations = [node]
+    if isinstance(node, ast.ClassDef):
+        declarations.extend(child for child in node.body
+                            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and child.name == "__init__")
+    signatures = []
+    for declaration in declarations:
+        if isinstance(declaration, ast.ClassDef):
+            bases = [ast.unparse(base) for base in declaration.bases]
+            bases.extend(ast.unparse(keyword) for keyword in declaration.keywords)
+            signature = f"class {declaration.name}" + (f"({', '.join(bases)})" if bases else "")
+        else:
+            prefix = "async def" if isinstance(declaration, ast.AsyncFunctionDef) else "def"
+            signature = f"{prefix} {declaration.name}({ast.unparse(declaration.args)})"
+            if declaration.returns is not None:
+                signature += f" -> {ast.unparse(declaration.returns)}"
+        signatures.append(signature)
+    return {"signature": "\n".join(signatures), "docstring": ast.get_docstring(node, clean=True) or ""}
 
 
 def build_source(snapshot, view):
@@ -56,7 +94,7 @@ def build_source(snapshot, view):
     calls_by_source = defaultdict(list)
     for c in snapshot["calls"]:
         calls_by_source[c["source"]].append(c)
-    out, counts = {}, defaultdict(int)
+    out = {}
     for sid in sorted(nodes | classes):
         x = symbols.get(sid)
         if not x or not x.get("source_excerpt"):
@@ -82,9 +120,8 @@ def build_source(snapshot, view):
                 kind, k = "edge", edge_of[(c["source"], c["target"])]
             else:
                 kind, k = "undrawn", None
-            if sid in nodes:
-                counts[kind] += 1
             # [line, first column, end column (or -1, -1), kind, edge index (or -1), called name]
             sites.append([*pos, kind, -1 if k is None else k, c["called_name"]])
-        out[sid] = {"file": x["file_id"], "start": start, "end": end, "text": x["source_excerpt"], "sites": sites}
-    return {"rule": SOURCE_RULE, "symbols": out, "counts": dict(sorted(counts.items()))}
+        out[sid] = {"file": x["file_id"], "start": start, "end": end, "text": x["source_excerpt"], "sites": sites,
+                    **source_documentation(x["source_excerpt"])}
+    return {"symbols": out}

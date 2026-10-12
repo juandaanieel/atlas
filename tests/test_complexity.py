@@ -1,5 +1,7 @@
 import ast
 
+import pytest
+
 from atlas.analyzer.complexity import function_complexity
 
 
@@ -71,3 +73,17 @@ def choose(primary, fallback):
         "cognitive_complexity": 2,
         "max_nesting_depth": 1,
     }
+
+
+@pytest.mark.parametrize("body", [
+    "if ready: pass",
+    "return 1 if ready else 0",
+    "for item in items: pass",
+    "async for item in items: pass",
+    "while ready: break",
+    "with context: pass",
+    "async with context: pass",
+    "assert ready",
+])
+def test_each_branch_form_counts_one_cyclomatic_path(body):
+    assert _metrics(f"async def run():\n    {body}\n")["cyclomatic_complexity"] == 2

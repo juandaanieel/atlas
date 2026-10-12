@@ -1,7 +1,7 @@
 /* Atlas Strata chrome. Two themes from GitHub Primer's high-contrast themes
-   (@primer/primitives 11.10.0, docs/plans/strata-theme.md). The canvas tokens live in
+   (@primer/primitives 11.10.0). The canvas tokens live in
    theme.js; the shared ones (canvas, text, muted, dim, the four signal hues) must match
-   it, which themeCheck() in app.js verifies. Blue appears only as load-bearing: the
+   it. In the map, blue marks load-bearing code; the
    chrome's "current" marker is the emphasis colour and weight, not an accent hue. */
 :root, :root[data-theme="dark"] {
   color-scheme: dark;
@@ -23,8 +23,16 @@
   --cycle: #cc1421;       /* red-8: import cycle */
   --clone-fill: rgba(166, 107, 255, 0.3);
   --dead-fill: rgba(200, 133, 8, 0.3);
-  --code-n: #656c76;      /* neutral-8: line numbers */
-  --code-ul: #656c76;     /* neutral-8: a linked call site's underline */
+  /* GitHub VS Code high-contrast syntax palette (Primer 7.10.0). */
+  --code-fg: #f0f3f6;
+  --code-comment: #bdc4cc;
+  --code-keyword: #ff9492;
+  --code-constant: #91cbff;
+  --code-function: #dbb7ff;
+  --code-string: #addcff;
+  --code-hover: #151b23;
+  --code-n: var(--code-comment);
+  --code-ul: var(--code-comment);
   --mono: "JetBrains Mono", "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 :root[data-theme="light"] {
@@ -40,8 +48,16 @@
   --text-soft: #393f46;   /* fgColor-neutral */
   --muted: #454c54;       /* fgColor-muted */
   --dim: #59636e;
-  --code-n: #818b98;      /* neutral-8 */
-  --code-ul: #818b98;     /* neutral-8 */         /* neutral-9 */
+  /* GitHub VS Code high-contrast syntax palette (Primer 7.10.0). */
+  --code-fg: #0e1116;
+  --code-comment: #66707b;
+  --code-keyword: #a0111f;
+  --code-constant: #023b95;
+  --code-function: #622cbc;
+  --code-string: #032563;
+  --code-hover: #f6f8fa;
+  --code-n: var(--code-comment);
+  --code-ul: var(--code-comment);
   --emphasis: #010409;    /* fgColor-default */
   --lb: #0349b4;          /* blue-5 */
   --clone: #844ae7;       /* purple-4 */
@@ -59,7 +75,7 @@ body {
   font: 12px/1.45 var(--mono);
 }
 
-/* the frame is the containing block of every fixed panel: ?size=1280x800 fixes its size */
+/* The frame contains the map and its floating controls. */
 #frame { position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; transform: translateZ(0); overflow: hidden; }
 #stage, #gl, #labels { position: fixed; inset: 0; width: 100%; height: 100%; }
 #labels { pointer-events: none; }
@@ -75,8 +91,8 @@ body {
 .hidden { display: none !important; }
 
 #top {
-  top: 12px; left: 12px; right: 12px; height: 40px;
-  display: flex; align-items: center; gap: 18px; padding: 0 14px;
+  top: 8px; left: 8px; right: calc(var(--panel-space, 0px) + 8px); height: 32px;
+  display: flex; align-items: center; gap: 12px; padding: 0 10px;
 }
 .brand { font-weight: 700; letter-spacing: 0.14em; color: var(--text); white-space: nowrap; }
 .brand .sep { color: var(--dim); margin: 0 8px; font-weight: 400; }
@@ -85,8 +101,8 @@ body {
 #crumbs a { color: var(--muted); text-decoration: none; cursor: pointer; }
 #crumbs a:hover, #crumbs a.cur { color: var(--text); }
 #crumbs .gt { color: var(--dim); }
-#views { display: flex; gap: 4px; }
-#views button, #modes button, #guide button, #rail button, #legend button {
+#views { display: flex; flex-wrap: wrap; gap: 4px; }
+#views button, #modes button, #guide button, #rail button, #cameraTools button {
   font: inherit; color: var(--muted); background: transparent; border: 1px solid transparent;
   border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
 }
@@ -95,123 +111,166 @@ body {
 #modes { display: flex; gap: 4px; }
 #themeBtn .ic { color: var(--text); }
 
-#side {
-  top: 64px; left: 12px; bottom: 64px; width: 300px; padding: 10px 0;
-  overflow-y: auto; overflow-x: hidden;
+/* One workbench: navigation, reading guide and linked source share the same space. */
+button, input { font: inherit; }
+button { touch-action: manipulation; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+button:disabled { opacity: 0.4; cursor: default !important; }
+#panel {
+  top: 0; right: 0; bottom: 0; width: 480px; border-radius: 0; border-width: 0 0 0 1px;
+  display: flex; flex-direction: column; background: var(--panel-solid);
+  box-shadow: 0 12px 40px #0000000d; z-index: 2;
 }
-#side .hint { padding: 12px 14px 4px; color: var(--dim); font-size: 10px; line-height: 1.5; }
-#side .h {
-  padding: 8px 14px 6px; color: var(--dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+#panel .grip { position: absolute; left: -6px; top: 0; bottom: 0; width: 12px; cursor: ew-resize; z-index: 3; display: flex; align-items: center; justify-content: center; touch-action: none; }
+#panel .grip i { width: 3px; height: 32px; border-radius: 3px; background: var(--line); }
+#panel .grip:hover i { background: var(--dim); }
+#panelNav { display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); flex: none; }
+#panelNav .sp { flex: 1; }
+#panelNav button, #cameraTools button {
+  padding: 6px 10px; background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); cursor: pointer; white-space: nowrap;
 }
-.row {
-  display: flex; align-items: center; gap: 8px; padding: 2px 14px; cursor: pointer;
-  white-space: nowrap; color: var(--muted); height: 21px;
-}
+#panelNav button:hover, #cameraTools button:hover { background: var(--hover); color: var(--text); }
+#panelNav button.on, #cameraTools button.on { background: var(--on); color: var(--emphasis); font-weight: 650; }
+#panelNav #panelBack, #panelNav #expandPanel, #panelNav #closePanel { padding: 6px 8px; font-size: 15px; line-height: 18px; }
+#browser { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
+.browse-head { padding: 20px 20px 16px; }
+.browse-head h2 { margin: 0 0 5px; font-size: 19px; letter-spacing: -0.04em; }
+.browse-head p { margin: 0 0 18px; color: var(--dim); font-size: 11px; }
+#symbolSearch { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--hover); outline-offset: 1px; }
+#symbolSearch::placeholder { color: var(--dim); }
+#tree { padding: 0 8px; }
+.row { display: flex; width: 100%; align-items: center; gap: 8px; padding: 8px 12px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; text-align: left; color: var(--muted); min-height: 34px; }
 .row:hover { color: var(--text); background: var(--hover); }
-.row.on { color: var(--emphasis); background: var(--on); font-weight: 700; }
+.row.current { color: var(--emphasis); font-weight: 650; }
+.row.on { color: var(--emphasis); background: var(--on); box-shadow: inset 2px 0 var(--emphasis); }
 .row.pkg { margin-top: 4px; }
-.row.mod { padding-left: 28px; font-size: 11.5px; }
-.row .nm { flex: 1; overflow: hidden; text-overflow: clip; }
-.row .mk { display: flex; gap: 5px; align-items: center; font-weight: 400; color: var(--muted); }
-/* the side panel's marks are the canvas marks in miniature (the legend's swatches) */
-.mk > span { display: inline-flex; align-items: center; gap: 3px; }
-.mk canvas { flex: none; }
-
-/* ---- the inspector: header, then the source with linked call sites (strata-inspector.md) */
-#inspector {
-  top: 64px; right: 12px; bottom: 64px; width: 420px; padding: 0;
-  display: flex; flex-direction: column; overflow: visible;
-  background: var(--panel-solid); /* code over a busy picture: nothing shows through */
-}
-#inspector .grip { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: ew-resize; z-index: 2; display: flex; align-items: center; justify-content: center; }
-#inspector .grip i { display: block; width: 3px; height: 34px; border-radius: 2px; background: var(--line-strong); }
-#inspector .grip:hover i { background: var(--dim); }
-#inspector .ihead { flex: none; padding: 8px 14px 9px; border-bottom: 1px solid var(--line); }
-#inspector .inav { display: flex; align-items: center; gap: 6px; height: 22px; margin-bottom: 4px; }
-#inspector .inav .sp { flex: 1; }
-#inspector .inav .ik { color: var(--dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
-#inspector .inav button {
-  font: inherit; font-size: 11px; color: var(--muted); background: transparent; border: 1px solid transparent;
-  border-radius: 5px; padding: 1px 7px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 85%;
-}
-#inspector .inav button:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
-#inspector .inav .close { font-size: 14px; line-height: 1; padding: 1px 6px; }
-#inspector .t { font-weight: 700; font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#inspector .q { color: var(--dim); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#inspector .tags { margin-top: 5px; }
-#inspector .ibody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 2px 0 12px; }
-#inspector .ibody > .s, #inspector .ibody > .v, #inspector .ibody > .ln, #inspector .ibody > .note, #inspector .ibody > .mls { padding-left: 14px; padding-right: 14px; }
-#inspector .s { color: var(--dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin: 10px 0 3px; display: flex; gap: 8px; align-items: baseline; white-space: nowrap; overflow: hidden; }
-#inspector .s .sk { letter-spacing: 0; text-transform: none; font-size: 10px; color: var(--dim); position: relative; }
-#inspector .s .sk .u { border-bottom: 1px solid var(--code-ul); }
-#inspector .s .sk .mk { position: relative; display: inline-block; top: -2px; width: 3px; height: 3px; border-radius: 50%; background: var(--code-ul); }
+.row.mod { padding-left: 26px; font-size: 12px; }
+.row.symbol { padding-left: 48px; font-size: 11.5px; }
+.row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chevron { width: 12px; color: var(--dim); font-size: 15px; }
+.symbol-icon { color: var(--dim); width: 14px; flex: none; }
+.symbol-meta { color: var(--dim); font-size: 10px; font-weight: 400; }
+.module-signals { padding: 2px 12px 6px 48px; }
+.counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: 10px; }
+.counts > span { padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
+.counts .count-dead { border-left: 3px solid var(--dead); }
+.counts .count-clone { border-left: 3px solid var(--clone); }
+.counts .count-lb { border-left: 3px solid var(--lb); }
+.empty-search { padding: 12px; color: var(--dim); }
+#inspector { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+#inspector .ihead { flex: none; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.source-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 14px; color: var(--dim); font-size: 10.5px; }
+.source-crumbs button { color: var(--dim); padding: 0; border: 0; background: transparent; cursor: pointer; overflow-wrap: anywhere; text-align: left; }
+.source-crumbs button:hover { color: var(--text); text-decoration: underline; }
+#inspector .t { font-weight: 700; font-size: 18px; letter-spacing: -0.04em; color: var(--text); overflow-wrap: anywhere; line-height: 1.4; }
+#inspector .q { color: var(--dim); font-size: 10.5px; overflow-wrap: anywhere; margin-top: 4px; }
+#inspector .tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+#inspector .ibody { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 20px; }
+#inspector .ibody > .s, #inspector .ibody > .v, #inspector .ibody > .ln, #inspector .ibody > .note, #inspector .ibody > .mls { padding-left: 20px; padding-right: 20px; }
+#inspector .signature { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); color: var(--code-fg); font: 11px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 130px; overflow: auto; }
+#inspector .signature code { font: inherit; }
+.source-tabs { display: flex; flex: none; gap: 18px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+.source-tabs button { padding: 11px 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font: inherit; }
+.source-tabs button[aria-selected="true"] { color: var(--emphasis); border-bottom-color: var(--emphasis); font-weight: 650; }
+.docstring { padding: 10px 20px 20px; color: var(--text-soft); font: 13px/1.75 system-ui, sans-serif; overflow-wrap: anywhere; }
+.docstring h1, .docstring h2, .docstring h3, .docstring h4 { color: var(--text); font-size: 15px; line-height: 1.5; margin: 20px 0 8px; }
+.docstring p { margin: 10px 0; }
+.docstring code { font: 11px/1.7 var(--mono); background: var(--hover); padding: 2px 4px; border-radius: 3px; }
+.docstring pre { padding: 12px; background: var(--hover); border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
+.docstring pre code { padding: 0; background: transparent; white-space: pre; }
+.docstring a { color: var(--code-constant); text-decoration: underline; }
+.docstring blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--line-strong); }
+.docstring table { width: 100%; border-collapse: collapse; }
+.docstring th, .docstring td { padding: 7px; border: 1px solid var(--line); text-align: left; }
+.docstring .missing-doc { color: var(--muted); }
+#source-code > .s, #source-code > .v, #source-code > .ln, #source-code > .mls { padding-left: 20px; padding-right: 20px; }
+#inspector .s { color: var(--dim); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; margin: 18px 0 8px; display: flex; gap: 10px; align-items: baseline; }
+#inspector .sk { letter-spacing: 0; text-transform: none; margin-left: auto; }
 #inspector .v { color: var(--muted); }
-#inspector .tag { display: inline-block; margin: 2px 4px 2px 0; padding: 0 6px; border-radius: 4px; border: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; white-space: nowrap; }
-#inspector .tag.lb { border-color: var(--lb); border-left-width: 3px; color: var(--text); }
-#inspector .tag.clone { border-color: var(--clone); border-style: dotted; background: var(--clone-fill); color: var(--text); }
-#inspector .tag.dead { border-color: var(--dead); border-style: dashed; background: var(--dead-fill); color: var(--text); }
-#inspector .tag.bold { color: var(--text); font-weight: 700; }
-#inspector .ln { white-space: nowrap; overflow: hidden; color: var(--muted); cursor: pointer; font-size: 11.5px; }
-#inspector .ln:hover { color: var(--text); }
-#inspector .note { color: var(--dim); font-size: 11px; margin-top: 8px; white-space: normal; }
-#inspector .mls { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11.5px; }
-#inspector .mls .ml { color: var(--muted); cursor: pointer; white-space: nowrap; }
-#inspector .mls .ml:hover { color: var(--text); }
-#inspector .mls .fd { color: var(--muted); white-space: nowrap; }
-#inspector .pad { padding: 0 14px; }
+#inspector .tag { padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+#inspector .tag.lb { border-left: 3px solid var(--lb); }
+#inspector .tag.clone { border-left: 3px solid var(--clone); }
+#inspector .tag.dead { border-left: 3px solid var(--dead); }
+#inspector .tag.bold { font-weight: 650; }
+#inspector .ln { display: block; width: 100%; text-align: left; background: transparent; border: 0; padding: 6px 8px; color: var(--text-soft); cursor: pointer; font-size: 11.5px; overflow-wrap: anywhere; }
+#inspector .ln:hover { background: var(--hover); color: var(--text); }
+#inspector .note { color: var(--muted); font-size: 12px; margin: 12px 0; line-height: 1.6; }
+#inspector .mls { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11.5px; }
+#inspector .ml { color: var(--text); cursor: pointer; }
+#inspector .ml:hover { text-decoration: underline; }
+#inspector .fd { color: var(--muted); }
+#inspector .pad { padding: 0 20px; }
+.relationships { border-top: 1px solid var(--line); margin-top: 20px; padding: 8px 12px; }
+.relationships details { border-bottom: 1px solid var(--line); padding: 8px; }
+.relationships summary { cursor: pointer; font-size: 11px; color: var(--text); }
+.relationships summary span { color: var(--dim); margin-left: 6px; }
+.relationships p, .source-note p { color: var(--dim); font-size: 11px; }
+.source-note { margin: 0 20px 12px; color: var(--dim); font-size: 10px; }
+.source-note summary { cursor: pointer; }
+/* Navigation stays available whichever workspace tab is open. */
+.control-box { margin: 12px 14px 0; border: 1px solid var(--line); border-radius: 8px; flex: none; background: var(--hover); }
+.control-box summary { cursor: pointer; padding: 9px 12px; font-size: 11px; color: var(--text); font-weight: 650; }
+#navProgress { float: right; color: var(--dim); font-size: 10px; font-weight: 400; }
+.control-body { padding: 0 8px 8px; }
+.tour-controls { display: flex; gap: 4px; }
+.tour-controls button, #guideStep { border: 1px solid var(--line); background: var(--panel-solid); color: var(--text); border-radius: 5px; padding: 6px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+.tour-controls button:hover { border-color: var(--line-strong); }
+#guideStep { flex: 1; min-width: 0; text-overflow: ellipsis; }
+#views button { flex: 1; padding: 5px 6px; font-size: 10px; }
+#cameraTools { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; padding-top: 6px; margin-top: 6px; border-top: 1px solid var(--line); }
+#cameraTools button { padding: 4px 8px; font-size: 11px; }
+#cameraTools #fitBtn { color: var(--text); font-weight: 650; }
+#cameraHint { flex-basis: 100%; font-size: 9px; color: var(--dim); padding: 3px 8px 0; }
+.tool-divider { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
 
-/* the excerpt: read-only, line numbers, calm syntax colours (the canvas hues stay reserved:
-   no teal, violet or red in the code) */
+/* Read-only Python, using github.com/primer/github-vscode-theme syntax roles. */
 #inspector .code { font: 11px/17px var(--mono); margin-top: 2px; }
 #inspector .cl { display: grid; grid-template-columns: 40px minmax(0, 1fr); }
 #inspector .cl .n { color: var(--code-n); text-align: right; padding-right: 10px; user-select: none; }
 /* a long line wraps at its spaces, continuing four columns in from its own indentation
    (source.js sets the hanging indent per line) */
-#inspector .cl code { font: inherit; color: var(--text-soft); white-space: pre-wrap; overflow-wrap: break-word; padding-right: 12px; min-width: 0; }
-#inspector .cl.ce:hover, #inspector .cl.hot { background: var(--on); }
+#inspector .cl code { font: inherit; color: var(--code-fg); white-space: pre-wrap; overflow-wrap: break-word; padding-right: 12px; min-width: 0; }
+#inspector .cl.ce:hover, #inspector .cl.hot { background: var(--code-hover); }
 #inspector .cl.hot .n { color: var(--text); }
-/* syntax by weight and lightness only: the four hues stay the canvas's signals */
-#inspector .tk-kw { color: var(--muted); font-weight: 700; }
-#inspector .tk-def { color: var(--emphasis); font-weight: 700; }
-#inspector .tk-str { color: var(--dim); }
-#inspector .tk-com { color: var(--dim); font-style: italic; }
-#inspector .tk-num, #inspector .tk-con { color: var(--muted); }
-#inspector .tk-bi { color: var(--muted); }
-#inspector .tk-dec { color: var(--muted); }
-#inspector .tk-op { color: var(--dim); }
-#inspector .tk-call { color: var(--text); }
+#inspector .tk-kw, #inspector .tk-op { color: var(--code-keyword); }
+#inspector .tk-def, #inspector .tk-call, #inspector .tk-dec { color: var(--code-function); }
+#inspector .tk-def { font-weight: 700; }
+#inspector .tk-str { color: var(--code-string); }
+#inspector .tk-com { color: var(--code-comment); }
+#inspector .tk-num, #inspector .tk-con, #inspector .tk-bi { color: var(--code-constant); }
 /* a call site: underlined when it is a drawn call (hover lights it, click opens the callee);
    a muted marker and a tooltip when it is not drawn (external, unresolved, ...) */
 #inspector .site { position: relative; }
 #inspector .site.e { cursor: pointer; }
 #inspector .site .ul { position: absolute; left: 0; right: 0; bottom: 1px; height: 1px; background: var(--code-ul); pointer-events: none; }
-/* a linked site whose callee carries a signal is underlined in the signal's hue (strata-v3) */
+/* a linked site whose callee carries a signal is underlined in the signal's hue */
 #inspector .site.e.sg-lb .ul { background: var(--lb); height: 1.5px; }
 #inspector .site.e.sg-clone .ul { background: var(--clone); height: 1.5px; }
 #inspector .site.e.sg-dead .ul { background: var(--dead); height: 1.5px; }
 #inspector .site.e:hover .ul, #inspector .site.e.hot .ul { background: var(--emphasis); height: 2px; }
-#inspector .site.e.hot, #inspector .site.e:hover { color: var(--emphasis); }
-#inspector .site.e.hot span, #inspector .site.e:hover span { color: var(--emphasis); }
 #inspector .site .mk { position: absolute; right: -3px; top: 2px; width: 3px; height: 3px; border-radius: 50%; background: var(--code-ul); pointer-events: none; }
-
-/* on the path the view presets and breadcrumbs do nothing: they look inert */
-#top.guiding #views button { color: var(--dim); cursor: default; }
-#top.guiding #views button.on { border-color: transparent; background: transparent; color: var(--muted); }
-#top.guiding #crumbs a { cursor: default; }
-#top.guiding #crumbs a:hover { color: var(--muted); }
 
 /* ---- the key overlay (k): every mark this view draws, with the reading conventions */
 #key {
-  left: 324px; right: 12px; bottom: 64px; padding: 8px 12px 6px; z-index: 3;
+  left: 12px; right: 12px; bottom: 114px; padding: 8px 12px 6px; z-index: 3;
   background: var(--panel-solid); /* an overlay: what it covers should not show through */
   column-width: 250px; column-gap: 18px; column-fill: balance;
 }
-#key > div { break-inside: avoid-column; margin-bottom: 6px; }
+#key > div { break-inside: avoid-column; margin-bottom: 10px; }
+#key .legend-title { column-span: all; display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+#key .legend-title button { border: 0; background: transparent; color: var(--text); cursor: pointer; padding: 4px 8px; }
 #key .kh { color: var(--dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; margin: 2px 0 4px; }
-#key .k { display: flex; align-items: center; gap: 6px; height: 18px; white-space: nowrap; color: var(--muted); font-size: 10px; overflow: hidden; }
+#key .k, #legend .k { display: flex; align-items: center; gap: 7px; min-height: 24px; color: var(--muted); font-size: 11px; }
 #key canvas { flex: none; }
+#legend { flex: none; border-top: 1px solid var(--line); padding: 12px 16px; max-height: 40%; overflow: auto; }
+#legend summary { color: var(--text); font-weight: 650; cursor: pointer; }
+#legendMarks { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 3px 12px; margin-top: 10px; }
+#legend canvas { flex: none; }
+#legend .legend-note { font-size: 11px; color: var(--dim); margin-top: 8px; }
+#legendMore { padding: 5px 0 0; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 11px; }
 
-/* the key map (strata-lines): an overlay over the picture's right side, toggled by ? */
+/* the key map: an overlay over the picture's right side, toggled by ? */
 #help {
   right: 12px; top: 64px; width: 520px; padding: 10px 14px 12px; z-index: 4;
   background: var(--panel-solid); font-size: 11px; color: var(--muted);
@@ -222,38 +281,20 @@ body {
 #help .hk { color: var(--text); white-space: nowrap; }
 #help .hv { color: var(--muted); }
 
-/* ---- the legend: always in the stage, bottom left; lists exactly the marks on screen */
-#legend {
-  left: 324px; bottom: 64px; padding: 6px 10px 6px; z-index: 2; max-width: 560px;
-  background: var(--panel);
-}
-#legend .lh { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; height: 16px; }
-#legend .lh .sp { flex: 1; }
-#legend .lh button { padding: 0 6px; line-height: 14px; font-size: 11px; letter-spacing: 0; color: var(--dim); }
-#legend .lh button:hover { color: var(--text); }
-#legend .lb-grid { display: grid; column-gap: 12px; row-gap: 0; margin-top: 3px; }
-#legend .k { display: flex; align-items: center; gap: 5px; height: 16px; white-space: nowrap; color: var(--text-soft); font-size: 10px; }
-#legend .k.sig { color: var(--text); }
-#legend canvas { flex: none; }
-#legend.pill { padding: 3px 4px 3px 10px; cursor: pointer; }
-#legend.pill .lb-grid { display: none; }
-#legend .mini { display: none; gap: 3px; align-items: center; }
-#legend.pill .mini { display: flex; }
-#legend .mini canvas { margin-right: 2px; }
-
 #status {
   left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 8px 14px; color: var(--muted);
 }
 
 /* ---- the guide panel: the step's text, its evidence, the marks in the picture */
 #guide {
-  top: 64px; left: 12px; bottom: 64px; width: 300px; padding: 14px 16px 12px;
+  padding: 20px; min-height: 0; flex: 1;
   display: flex; flex-direction: column; overflow: hidden;
 }
+#guide .guide-content { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
 #guide .gh { color: var(--dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; white-space: nowrap; overflow: hidden; }
 #guide .gh b { color: var(--muted); font-weight: 700; }
 #guide .gp { color: var(--dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin-top: 16px; }
-#guide h2 { margin: 4px 0 8px; font-size: 17px; line-height: 1.25; color: var(--emphasis); font-weight: 700; overflow-wrap: anywhere; }
+#guide h2 { margin: 6px 0 14px; font-size: 23px; line-height: 1.25; color: var(--emphasis); font-weight: 700; overflow-wrap: anywhere; }
 #guide .gb { margin: 0; color: var(--text-soft); font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; }
 #guide .gs { color: var(--dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin: 14px 0 4px; }
 #guide .ev { color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
@@ -261,44 +302,55 @@ body {
 #guide .ev span { color: var(--dim); }
 #guide .k { display: flex; align-items: center; gap: 8px; height: 19px; white-space: nowrap; color: var(--muted); font-size: 10.5px; overflow: hidden; }
 #guide .k canvas { flex: none; }
-#guide .grow { flex: 1; min-height: 8px; }
-#guide .gnav { display: flex; gap: 8px; }
-#guide .gnav button { border-color: var(--line-strong); background: var(--hover); color: var(--text); padding: 6px 10px; }
-#guide .gnav button.next { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
-#guide .gnav button:disabled { color: var(--dim); background: transparent; cursor: default; }
-#guide .gnav button:not(:disabled):hover { border-color: var(--muted); }
-#guide .hint { color: var(--dim); font-size: 10px; margin-top: 8px; line-height: 1.5; }
+#guide .guide-key { margin: 18px 0; color: var(--dim); font-size: 11px; }
+#guide .guide-key summary { cursor: pointer; }
+#gmarks { margin-top: 8px; }
 
-/* ---- the progress rail: chapters, tour stops, review stops; visited ones filled */
-#rail {
-  left: 12px; right: 12px; bottom: 12px; height: 40px; padding: 0 10px;
-  display: flex; align-items: center; gap: 4px; overflow: hidden; white-space: nowrap;
-}
-#rail .resume { color: var(--emphasis); border-color: var(--line-strong); background: var(--on); margin-right: 8px; font-weight: 700; }
-#rail .seg { color: var(--dim); cursor: pointer; padding: 4px 8px; border-radius: 6px; font-size: 11px; position: relative; }
-#rail .seg b { color: inherit; font-weight: 700; margin-right: 6px; }
-#rail .seg.seen { color: var(--muted); }
-#rail .seg.cur { color: var(--emphasis); background: var(--on); font-weight: 700; }
-#rail .seg:hover { color: var(--text); }
-#rail .gl { color: var(--dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin: 0 4px 0 10px; }
-#rail .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--dim); margin: 0 3px; cursor: pointer; }
-#rail .dot.seen { background: var(--dim); }
-#rail .dot.cur { background: var(--emphasis); border-color: var(--emphasis); }
-#rail .dot:hover { border-color: var(--text); }
-#rail .sp { flex: 1; }
-#rail .count { color: var(--dim); font-size: 10.5px; }
-#rail .sep { width: 1px; height: 16px; background: var(--line); margin: 0 6px; }
-#rail.away .seg.cur { background: transparent; color: var(--muted); text-decoration: underline; text-underline-offset: 4px; }
-#rail.away .dot.cur { background: transparent; border-color: var(--emphasis); }
+/* A separate prompt workspace, available before or after the tour. */
+#prompt { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 20px; gap: 14px; }
+.prompt-head h2 { margin: 0 0 8px; font-size: 22px; letter-spacing: -0.04em; }
+.prompt-head p { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 8px; }
+#promptMeta { color: var(--dim); font-size: 10px; }
+#optimizationPrompt { flex: 1; min-height: 100px; width: 100%; resize: none; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--hover); color: var(--text); font: 11px/1.7 var(--mono); }
+.prompt-footer { flex: none; }
+#copyPrompt { width: 100%; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--emphasis); background: var(--on); font-weight: 650; cursor: pointer; }
+#copyPrompt:hover { background: var(--hover); }
+#copyStatus { font-size: 10px; color: var(--dim); margin: 8px 0 0; }
 
-/* a tour or review stop lists what it lights, by module, in call order */
-#guide > * { flex: none; }
-#guide > .fl-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-bottom: 10px; }
-#guide > .fl-wrap.ev-wrap { flex: 0 1 auto; min-height: 40px; margin-bottom: 0; }
-#guide > .grow { flex: 1 1 auto; }
-#guide .fl { font-size: 11px; line-height: 1.6; color: var(--dim); margin-bottom: 3px; }
-#guide .fl .fm { color: var(--dim); margin-right: 4px; }
-#guide .fl .fn { color: var(--text); cursor: pointer; white-space: nowrap; }
-#guide .fl .fn:hover { color: var(--emphasis); text-decoration: underline; }
+/* Slim status rail; all navigation lives in the workbench. */
+#rail { left: 8px; right: calc(var(--panel-space, 0px) + 8px); bottom: 8px; height: 26px; padding: 0 10px; display: flex; align-items: center; gap: 12px; font-size: 10px; color: var(--dim); }
+#rail > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#rail .count { margin-left: auto; white-space: nowrap; }
+
+/* Reachable functions remain available without dumping the full call tree into the guide. */
+#guide .fl-wrap { margin: 8px 0 16px; }
+#guide .fl { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+#guide .fl summary { padding: 10px 12px; cursor: pointer; font-size: 12px; color: var(--text); }
+#guide .fl .fm { float: right; color: var(--dim); font-size: 11px; }
+#guide .fl[open] summary { background: var(--hover); border-bottom: 1px solid var(--line); }
+#guide .fl .fn { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; background: transparent; color: var(--text); padding: 8px 12px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#guide .fl .fn:hover { background: var(--hover); color: var(--emphasis); }
 
 .dim { color: var(--dim); }
+
+@media (max-width: 1200px) {
+  #top { gap: 6px; }
+  #top button { padding: 2px 5px; font-size: 10px; }
+  #crumbs { display: none; }
+  .brand { margin-right: auto; overflow: hidden; text-overflow: ellipsis; }
+}
+@media (max-width: 720px) {
+  #panel { width: 100% !important; }
+  #panel .grip, #expandPanel { display: none; }
+  #panelNav { padding: 8px; gap: 2px; }
+  #panelNav button { padding: 6px 8px; }
+  #help { width: calc(100% - 24px); max-height: calc(100% - 80px); overflow: auto; top: 52px; }
+  #key { max-height: 70%; overflow: auto; column-width: auto; bottom: 40px; }
+}
+@media (max-height: 700px) {
+  .control-box { margin-top: 6px; }
+  .control-box summary { padding-top: 6px; padding-bottom: 6px; }
+  #cameraHint { display: none; }
+  #prompt, #guide { padding: 14px; }
+  .prompt-head p { display: none; }
+}

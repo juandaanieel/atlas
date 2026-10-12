@@ -30,49 +30,20 @@ class _CyclomaticVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.value = 1
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+    def visit_FunctionDef(self, node: ast.AST) -> None:
         return
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        return
+    visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        return
-
-    def visit_If(self, node: ast.If) -> None:
+    def visit_If(self, node: ast.AST) -> None:
         self.value += 1
         self.generic_visit(node)
 
-    def visit_IfExp(self, node: ast.IfExp) -> None:
-        self.value += 1
-        self.generic_visit(node)
-
-    def visit_For(self, node: ast.For) -> None:
-        self.value += 1
-        self.generic_visit(node)
-
-    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
-        self.value += 1
-        self.generic_visit(node)
-
-    def visit_While(self, node: ast.While) -> None:
-        self.value += 1
-        self.generic_visit(node)
-
-    def visit_With(self, node: ast.With) -> None:
-        self.value += 1
-        self.generic_visit(node)
-
-    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-        self.value += 1
-        self.generic_visit(node)
+    visit_IfExp = visit_For = visit_AsyncFor = visit_While = visit_If
+    visit_With = visit_AsyncWith = visit_Assert = visit_If
 
     def visit_Try(self, node: ast.Try) -> None:
         self.value += len(node.handlers)
-        self.generic_visit(node)
-
-    def visit_Assert(self, node: ast.Assert) -> None:
-        self.value += 1
         self.generic_visit(node)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> None:

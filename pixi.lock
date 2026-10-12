@@ -806,4 +806,4 @@ packages:
   requires_dist:
   - jsonschema>=4.18,<5 ; extra == 'test'
   - pytest>=8,<9 ; extra == 'test'
-  requires_python: '>=3.9'
+  requires_python: '>=3.11'

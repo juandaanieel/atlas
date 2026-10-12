@@ -4,41 +4,14 @@ from __future__ import annotations
 from collections import defaultdict, deque
 
 CONTEXT_DEPTH = {"0": 0, "1": 1, "2": 2, "all": None}
-# the stub rule (docs/plans/strata-inspector.md): a pipeline step whose reach leaves the root's row
+# A pipeline step whose reach leaves the root's row
 # frames the whole reach from the raised Elevation when the off-row part is more than STUB_SHARE of
 # the reach; otherwise it faces the root's row and every call that leaves the row ends in a labelled
 # pill at the card edge (callee and package), with no line drawn off the row
 STUB_SHARE = 1 / 4
 SPAN_MARK = {"plate": "link_track", "row": "link_row", "cross_row": "link_arc"}
 
-GUIDE_RULE = [
-    "chapters: the story's chapters in story order (story version 2: kind chapter, pipeline or signal); each view key resolves to Strata state",
-    "levels: the story's level (package: the map; module: boxes; function: unfolded) and unfold list; without an unfold list a module unfolds "
-    "only when the step opens one of its classes or lights a set inside it that reaches its internals",
-    "tiers: what the text names is tier 1, the modules the step touches tier 2, the rest tier 3",
-    "pipeline: the root's call tree (context all), pulsed, with the story's trace; signal: the whole class the signal names "
-    "(dead functions, clone groups, load-bearing functions, modules in import cycles)",
-    "camera: map for a package-level chapter, Plan for a plan camera, Elevation (face-on, section cut) when the framed set stands in one row, "
-    "raised Elevation otherwise",
-    "stubs: a pipeline step whose reach leaves the root's row frames the whole reach from the raised Elevation when more than a quarter "
-    "of the reach stands off the row; otherwise it faces the root's row, and each call that leaves the row ends in a pill at the card edge "
-    "naming the callee and its package (no line is drawn off the row)",
-]
-
-
-def _plural(n, word):
-    return f"{n} {word}" if n == 1 else f"{n} {word}s"
-
-
-def _join(names):
-    names = list(names)
-    if len(names) <= 1:
-        return "".join(names)
-    return ", ".join(names[:-1]) + " and " + names[-1]
-
-
-def build_guide(F, view, story):
-    snapshot = F["snapshot"]
+def build_guide(view, story):
     package = view["package"]
     N = {n["id"]: n for n in view["nodes"]}
     CLS = {c["id"]: c for c in view["classes"]}
@@ -308,12 +281,10 @@ def build_guide(F, view, story):
         rec["pills"], rec["off_edges"] = pills, off
 
     # ---- chapters: story view keys -> Strata state ----------------------------
-    kinds = defaultdict(int)
     steps = []
     for number, ch in enumerate(story["chapters"], 1):
         v = ch["view"]
         kind = ch.get("kind", "chapter")
-        kinds[kind] += 1
         scope = scope_of(v.get("scope", ""))
         cross_file = bool(v.get("cross_file", False))
         cap = CONTEXT_DEPTH[v.get("context", "all")]
@@ -378,12 +349,14 @@ def build_guide(F, view, story):
         elif depth or evidence:
             nodes = set(depth)
             if depth and all(N[i]["dead"] for i in depth):
-                nodes |= {i for i, n in N.items() if n["dead"] and n["module"] in {N[j]["module"] for j in depth}}
+                modules = {N[i]["module"] for i in depth}
+                nodes |= {i for i, n in N.items() if n["dead"] and n["module"] in modules}
             if kind == "chapter":
                 nodes |= {i for i in evidence if i in N}
-            built = {c for c in classes if c not in {N[i]["cls"] for i in nodes}}
+            node_classes = {N[i]["cls"] for i in nodes}
+            built = classes - node_classes
             if kind == "chapter":
-                built |= {i for i in evidence if i in CLS and i not in {N[j]["cls"] for j in nodes}}
+                built |= {i for i in evidence if i in CLS and i not in node_classes}
             rec["frame"] = {"nodes": sorted(nodes), "classes": sorted(built), "modules": []}
         elif scope:
             rec["frame"] = {"nodes": [], "classes": [], "modules": scope_modules(scope)}
@@ -404,10 +377,5 @@ def build_guide(F, view, story):
 
     return {
         "title": story["title"],
-        "summary": story["summary"],
-        "snapshot_id": story["snapshot_id"],
-        "rule": GUIDE_RULE,
-        "chapters": len(steps),
-        "kinds": dict(kinds),
         "steps": steps,
     }

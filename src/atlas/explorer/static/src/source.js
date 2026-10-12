@@ -1,6 +1,5 @@
-// The inspector's source view (docs/plans/strata-inspector.md): a Python tokenizer
-// (ported from the 2D explorer's highlightPythonLine, returning token ranges instead of
-// HTML) and the excerpt as DOM lines whose call sites carry Python's linking.
+// The inspector's source view: a Python tokenizer returning token ranges and an excerpt as
+// DOM lines whose call sites carry Python's linking.
 // Python (source.py) decides what every call site is: a drawn call (its
 // edge index), external, unresolved, recursive or undrawn, and its column range. This
 // file only colours tokens and wraps Python's column ranges.

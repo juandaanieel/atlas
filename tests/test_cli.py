@@ -5,9 +5,7 @@ import subprocess
 
 import pytest
 
-from atlas.analyzer.payload import write_report
 from atlas.cli import main
-from atlas.diagrams import write_diagrams
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -50,17 +48,6 @@ def test_vault_writes_to_an_explicit_directory(tmp_path):
     main(["vault", "--where", str(target), "--out", str(output)])
 
     assert (output / "00-atlas" / "Home.md").exists()
-
-
-def test_explore_rejects_the_removed_workflow_flag(tmp_path):
-    source = FIXTURES / "simple_package"
-    target = tmp_path / "simple_package"
-    shutil.copytree(source, target)
-
-    with pytest.raises(SystemExit):
-        main(["explore", "--where", str(target), "--workflow", str(target / "examples")])
-
-    assert not (target / ".atlas" / "atlas.json").exists()
 
 
 def test_explore_registers_output_dir_with_local_git_excludes(tmp_path):
@@ -125,40 +112,29 @@ def test_explorer_escapes_script_closing_text_in_the_payload(tmp_path):
     assert "\\u003c/script\\u003e\\u003cscript\\u003e" in index
 
 
-def test_report_writes_markdown(tmp_path):
-    source = FIXTURES / "simple_package"
-    target = tmp_path / "simple_package"
-    shutil.copytree(source, target)
+def test_dashboard_command_passes_safe_defaults(monkeypatch, tmp_path):
+    called = {}
 
-    write_report(target)
+    def fake_serve_dashboard(**options):
+        called.update(options)
 
-    report = target / ".atlas" / "report.md"
-    assert report.exists()
-    assert "# Atlas Report" in report.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "atlas.dashboard.server.serve_dashboard",
+        fake_serve_dashboard,
+    )
 
+    main(
+        [
+            "dashboard",
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--no-open",
+        ]
+    )
 
-def test_render_writes_workflow_and_map_diagrams(tmp_path):
-    source = FIXTURES / "simple_package"
-    target = tmp_path / "simple_package"
-    shutil.copytree(source, target)
-
-    write_diagrams(target)
-
-    diagrams = target / ".atlas" / "diagrams"
-    expected = {"workflow.mmd", "map.mmd"}
-    assert {path.name for path in diagrams.iterdir()} == expected
-    assert "Atlas Workflow" in (diagrams / "workflow.mmd").read_text(encoding="utf-8")
-    assert "Atlas Layer Map" in (diagrams / "map.mmd").read_text(encoding="utf-8")
-
-
-def test_workflow_ghosts_dead_code(tmp_path):
-    source = FIXTURES / "defect_package"
-    target = tmp_path / "defect_package"
-    shutil.copytree(source, target)
-
-    write_diagrams(target)
-
-    workflow = (target / ".atlas" / "diagrams" / "workflow.mmd").read_text(encoding="utf-8")
-    # Dead code is drawn with the ghost class, not the live workflow.
-    assert ":::ghost" in workflow
-    assert "dead code" in workflow
+    assert called == {
+        "state_dir": tmp_path / "state",
+        "port": 7331,
+        "open_browser": False,
+        "timeout_seconds": 900,
+    }

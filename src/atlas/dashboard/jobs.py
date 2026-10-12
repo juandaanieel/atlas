@@ -46,7 +46,7 @@ class RefreshJobs:
                 "project_name": project["name"],
                 "path": project["path"],
                 "state": "queued",
-                "created_at": _utc_now(),
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "started_at": None,
                 "finished_at": None,
                 "result": None,
@@ -58,10 +58,7 @@ class RefreshJobs:
 
     def get(self, job_id: str) -> dict:
         with self._lock:
-            try:
-                return dict(self._jobs[job_id])
-            except KeyError as error:
-                raise KeyError(job_id) from error
+            return dict(self._jobs[job_id])
 
     def active_for(self, project_id: str) -> dict | None:
         with self._lock:
@@ -115,10 +112,10 @@ class RefreshJobs:
                 if self._closed:
                     job["state"] = "failed"
                     job["error"] = "Dashboard stopped before this update started"
-                    job["finished_at"] = _utc_now()
+                    job["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     continue
                 job["state"] = "running"
-                job["started_at"] = _utc_now()
+                job["started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self._run_job(job_id)
 
     def _run_job(self, job_id: str) -> None:
@@ -184,7 +181,7 @@ class RefreshJobs:
             job["state"] = state
             job["result"] = result
             job["error"] = error
-            job["finished_at"] = _utc_now()
+            job["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _worker_result(stdout: str) -> dict:
@@ -210,7 +207,3 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
         except ProcessLookupError:
             pass
         process.wait()
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

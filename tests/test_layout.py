@@ -377,6 +377,7 @@ def test_model_is_independent_of_input_order(name, tmp_path):
             shuffled["objects"],
             document["overview"]["circular_imports"],
             {node["id"]: node["exported_from"] for node in document["model"]["nodes"] if node["exported"]},
+            document["references"],
         )
         assert model == document["model"]
 

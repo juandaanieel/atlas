@@ -22,7 +22,6 @@ def test_dashboard_refresh_writes_only_atlas_owned_project_output(tmp_path):
 
     assert result["snapshot_id"].startswith("sha256:")
     assert source.read_text(encoding="utf-8") == before
-    assert (project / ".atlas" / ".atlas-owned").is_file()
     assert (project / ".atlas" / "atlas.json").is_file()
     assert (project / ".atlas" / "vault" / "00-atlas" / ".atlas-generated").is_file()
     assert not (project / ".atlas" / "explorer").exists()

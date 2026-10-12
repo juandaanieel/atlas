@@ -8,7 +8,7 @@ from atlas.explorer.layout import MARGIN_IN, MARGIN_LANE, MARGIN_OUT, column_lan
 
 R_LANE, R_COR_GAP, R_SKY_GAP, R_APEX, R_RISE = 0.3, 0.75, 0.9, 2.4, 0.1
 R_SIDE, R_STRAND, R_MEMBER, R_CORNER, R_FRONT, R_GUT0 = 0.35, 0.2, 0.1, 0.2, 0.06, 0.06
-R_RISER = 0.075  # strata-lines: risers at one box side at most this far apart (strata-v2: 0.045)
+R_RISER = 0.075  # risers at one box side are kept close together
 R_MEMBER_RISER = 0.035  # a stub's members each take their own riser this far apart
 DENSIFY = 0.5
 CURVE_Z = 0.09  # per-call curves stand this far in front of the box faces (tracks: R_FRONT)
@@ -281,7 +281,7 @@ def build_routes(view):
 
     def end_state(e, role, st):
         """(group, x, y, h, z, pitch, inset) of edge e's end (role s|t) in state st (f|o|x)."""
-        item, m = (e["s"], e["ms"]) if role == "s" else (e["t"], e["mt"])
+        item, m = e[role], e["m" + role]
         if st == "f":
             g, x, y, h, z = folded(item, m, role)
             return (g + (role,), x, y, h, z, PORT_PITCH, PORT_INSET)
@@ -345,7 +345,7 @@ def build_routes(view):
     for ei in margin_calls:
         e = edges[ei]
         for role in ("s", "t"):
-            item = e["s"] if role == "s" else e["t"]
+            item = e[role]
             for st in (("o", "x") if class_of_end(item) is not None else ("o",)):
                 margin_at[element(item, st)[0]].append((ei, role))
 
@@ -375,7 +375,7 @@ def build_routes(view):
 
     def margin_port(ei, role, st):
         e = edges[ei]
-        item = e["s"] if role == "s" else e["t"]
+        item = e[role]
         st2 = "x" if st == "x" and class_of_end(item) is not None else "o"
         grp, xl, xr, y, h, z, pitch, inset = element(item, st2)
         lst = margin_at[grp]
@@ -502,5 +502,4 @@ def build_routes(view):
         "ribbons": out_ribbons,
         "calls": out_calls,
         "margin": {m: {"lanes": margin_lanes[m], "pitch": _r3(margin_pitch[m]), "width": box(m)["margin"]} for m in sorted(margin_lanes)},
-        "constants": {"curve_z": CURVE_Z, "port_pitch": PORT_PITCH, "curve_lane": CURVE_LANE, "margin_pitch": MARGIN_PITCH, "margin_lane": MARGIN_LANE, "track_front": R_FRONT},
     }

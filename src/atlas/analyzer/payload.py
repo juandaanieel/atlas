@@ -26,6 +26,7 @@ from atlas.analyzer.models import CallInfo, SymbolInfo, WarningInfo, to_dict
 from atlas.analyzer.objects import assign_onion_rings
 from atlas.analyzer.parser import ParsedFile, parse_python_file
 from atlas.analyzer.snapshot import AnalysisSnapshot, SNAPSHOT_VERSION
+from atlas.analyzer.references import build_references
 from atlas.output import checked_output_path, ensure_output_dir
 
 
@@ -47,6 +48,7 @@ def analyze_path(
     objects = [item for parsed in parsed_files for item in parsed.objects]
     imports = [item for parsed in parsed_files for item in parsed.imports]
     calls = build_calls(parsed_files, symbols)
+    references = build_references(parsed_files, symbols)
     resolve_import_symbols(parsed_files, symbols)
     exports = package_exports(parsed_files, symbols)
 
@@ -86,12 +88,14 @@ def analyze_path(
         object_dicts,
         circular_imports,
         exports,
+        references,
     )
     snapshot_id = _snapshot_id(
         directories,
         file_dicts,
         symbol_dicts,
         call_dicts,
+        references,
         import_dicts,
         model,
         functionality_digest(root, resolved_vault_dir),
@@ -119,6 +123,7 @@ def analyze_path(
             "symbols": symbol_dicts,
             "objects": object_dicts,
             "calls": call_dicts,
+            "references": references,
             "imports": import_dicts,
             "warnings": warning_dicts,
             "model": model,
@@ -218,8 +223,6 @@ def _git_status(root: Path) -> dict:
         "counts": counts,
         "files": sorted(files, key=lambda file: file["path"]),
     }
-
-
 def write_payload(path: str | Path, snapshot: AnalysisSnapshot | None = None) -> Path:
     root = resolve_analysis_root(path)
     snapshot = snapshot or analyze_path(root)
@@ -236,15 +239,6 @@ def load_payload(path: str | Path) -> AnalysisSnapshot:
         raise ValueError(f"Refusing to read symlinked Atlas output: {output_dir}")
     payload_path = checked_output_path(output_dir, "atlas.json")
     return AnalysisSnapshot.from_json(payload_path.read_text(encoding="utf-8"))
-
-
-def write_report(path: str | Path) -> Path:
-    root = resolve_analysis_root(path)
-    payload = analyze_path(root)
-    output_dir = ensure_output_dir(root)
-    output_path = checked_output_path(output_dir, "report.md")
-    output_path.write_text(_markdown_report(payload), encoding="utf-8")
-    return output_path
 
 
 def _apply_call_metrics(symbols: list[SymbolInfo], calls: list[CallInfo]) -> None:
@@ -360,6 +354,7 @@ def _snapshot_id(
     files: list[dict],
     symbols: list[dict],
     calls: list[dict],
+    references: list[dict],
     imports: list[dict],
     model: dict,
     functionalities: str,
@@ -370,6 +365,7 @@ def _snapshot_id(
         "files": files,
         "symbols": symbols,
         "calls": calls,
+        "references": references,
         "imports": imports,
         "model": model,
         "functionalities": functionalities,
@@ -386,10 +382,13 @@ def _overview(
     model: dict,
 ) -> dict:
     callable_symbols = [symbol for symbol in symbols if symbol.kind in {"function", "method"}]
+    symbols_by_id = {}
+    for symbol in symbols:
+        symbols_by_id.setdefault(symbol.id, symbol)
     unresolved_by_file: dict[str, int] = {file.id: 0 for file in files}
     for call in calls:
         if call.kind == "unresolved":
-            source = next((symbol for symbol in symbols if symbol.id == call.source), None)
+            source = symbols_by_id.get(call.source)
             if source:
                 unresolved_by_file[source.file_id] = unresolved_by_file.get(source.file_id, 0) + 1
 
@@ -421,7 +420,7 @@ def _overview(
         ],
         "most_connected_functions": [
             _symbol_summary(symbol)
-            for symbol in sorted(callable_symbols, key=lambda item: (-_connection_count(item), item.id))[:10]
+            for symbol in sorted(callable_symbols, key=lambda item: (-sum(item.metrics.values()), item.id))[:10]
         ],
         "files_with_most_unresolved": [
             {"file_id": file_id, "unresolved_calls": count}
@@ -431,10 +430,6 @@ def _overview(
         "circular_imports": circular_imports,
         "entrypoints": [_symbol_summary(symbol) for symbol in callable_symbols if symbol.is_entrypoint],
     }
-
-
-def _connection_count(symbol: SymbolInfo) -> int:
-    return sum(symbol.metrics.values())
 
 
 def _symbol_summary(symbol: SymbolInfo) -> dict:
@@ -448,86 +443,3 @@ def _symbol_summary(symbol: SymbolInfo) -> dict:
         "warnings": symbol.warnings,
         "metrics": symbol.metrics,
     }
-
-
-def _markdown_report(payload: dict) -> str:
-    model = payload["model"]
-    summary = model["summary"]
-    node_by_id = {node["id"]: node for node in model["nodes"]}
-    lines = [
-        f"# Atlas Report: {payload['package_name']}",
-        "",
-        "Architecture health, derived from the call graph. Counts above zero in",
-        "the defect sections below are where to look first.",
-        "",
-        "## Signals",
-        "",
-        f"- Callable functions/methods: {summary['callable_count']}",
-        f"- Public entry surface (roots): {summary['root_count']}",
-        f"- Reachable from the entry surface: {summary['reachable_count']}",
-        f"- **Dead** (private, never reached): {summary['dead_count']}",
-        f"- **Clone groups** (duplicated structure): {summary['clone_group_count']}",
-        f"- **Load-bearing** (hubs and chokepoints): {summary['load_bearing_count']}",
-        f"- Pass-through wrappers: {summary['wrapper_count']}",
-        f"- Layering violations: {summary['layer_violation_count']}",
-        f"- Circular imports: {payload['overview']['circular_import_count']}",
-        "",
-        "## Dead Code",
-        "",
-        "Private callables not reachable from any public entry point.",
-        "",
-    ]
-    dead = [node for node in model["nodes"] if node["dead"]]
-    lines.extend(_node_lines(dead, lambda node: f"`{node['qualified_name']}` ({node['file_id']}:{node['line_start']})"))
-
-    lines.extend(["", "## Clone Groups", "", "Functions sharing an identical structural fingerprint.", ""])
-    if model["clones"]:
-        for group in model["clones"]:
-            scope = "cross-module" if group["cross_module"] else "same-module"
-            members = ", ".join(f"`{node_by_id.get(mid, {}).get('qualified_name', mid)}`" for mid in group["members"])
-            lines.append(f"- {len(group['members'])}× {scope}: {members}")
-    else:
-        lines.append("- None")
-
-    lines.extend(["", "## Load-Bearing Functions", "", "Hubs many functions depend on, or chokepoints linking parts of the graph.", ""])
-    load_bearing = sorted(
-        (node for node in model["nodes"] if node["load_bearing"]),
-        key=lambda node: (-node["fan_in"], node["id"]),
-    )
-
-    def _reason(node):
-        marks = []
-        if node["is_hub"]:
-            marks.append(f"hub, fan-in {node['fan_in']}")
-        if node["is_orchestrator"]:
-            marks.append(f"orchestrator, fan-out {node['fan_out']}")
-        return f"`{node['qualified_name']}` ({'; '.join(marks)})"
-
-    lines.extend(_node_lines(load_bearing, _reason))
-
-    lines.extend(["", "## Layering Violations", "", "Pairs of layers that depend on each other (mutual coupling).", ""])
-    if model["layer_violations"]:
-        for item in model["layer_violations"]:
-            left, right = item["layers"]
-            lines.append(f"- `{left}` <-> `{right}`")
-    else:
-        lines.append("- None")
-
-    lines.extend(["", "## Circular Imports", ""])
-    cycles = payload["overview"]["circular_imports"]
-    if cycles:
-        for cycle in cycles:
-            lines.append(f"- {' -> '.join(cycle)}")
-    else:
-        lines.append("- None")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _node_lines(nodes: list[dict], formatter, limit: int = 25) -> list[str]:
-    if not nodes:
-        return ["- None"]
-    lines = [f"- {formatter(node)}" for node in nodes[:limit]]
-    if len(nodes) > limit:
-        lines.append(f"- ... and {len(nodes) - limit} more")
-    return lines

@@ -18,17 +18,21 @@ def test_snapshot_serializes_and_round_trips_as_the_same_contract(tmp_path):
 
     assert json.loads(encoded) == snapshot.to_dict()
     assert decoded.to_dict() == snapshot.to_dict()
-    assert decoded["snapshot_version"] == 8
+    assert decoded["snapshot_version"] == 9
     assert "simple_pkg" in decoded["directories"]
 
 
 def test_snapshot_is_read_only_through_mapping_access():
-    snapshot = analyze_path(FIXTURES / "simple_package")
+    original = analyze_path(FIXTURES / "simple_package").to_dict()
+    snapshot = AnalysisSnapshot.from_dict(original)
+    encoded = snapshot.to_json()
 
-    files = snapshot["files"]
-    files.clear()
+    original["files"].clear()
+    snapshot["files"].clear()
+    snapshot["model"]["nodes"][0]["name"] = "changed"
+    snapshot.to_dict()["model"]["nodes"].clear()
 
-    assert snapshot["files"]
+    assert snapshot.to_json() == encoded
 
 
 def test_snapshot_records_empty_source_directories(tmp_path):

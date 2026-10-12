@@ -16,6 +16,7 @@
     "symbols",
     "objects",
     "calls",
+    "references",
     "imports",
     "warnings",
     "model",
@@ -25,7 +26,7 @@
   ],
   "properties": {
     "atlas_version": { "type": "string", "minLength": 1 },
-    "snapshot_version": { "const": 8 },
+    "snapshot_version": { "const": 9 },
     "snapshot_id": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
@@ -49,6 +50,20 @@
     "calls": {
       "type": "array",
       "items": { "$ref": "#/$defs/call" }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "file_id", "line"],
+        "properties": {
+          "source": { "type": ["string", "null"] },
+          "target": { "type": "string", "minLength": 1 },
+          "file_id": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      }
     },
     "imports": {
       "type": "array",

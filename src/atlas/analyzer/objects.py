@@ -4,6 +4,7 @@ import ast
 import re
 from collections import defaultdict, deque
 
+from atlas.analyzer.ast_names import dotted_name
 from atlas.analyzer.classify import is_private_name
 from atlas.analyzer.docstrings import summarize_docstring
 from atlas.analyzer.models import SymbolInfo
@@ -164,7 +165,7 @@ def extract_objects(
                 }
             )
 
-            for field_name, value in _self_assignments(method):
+            for field_name, value in SelfAssignmentVisitor().collect(method):
                 field_record = _field_record(
                     field_name,
                     value,
@@ -329,7 +330,7 @@ def _declared_fields(
 
 def _is_dataclass_like(node: ast.ClassDef) -> bool:
     for decorator in node.decorator_list:
-        name = _dotted_name(decorator)
+        name = dotted_name(decorator)
         if name and name.split(".")[-1] in DATACLASS_DECORATOR_NAMES:
             return True
     return False
@@ -341,7 +342,7 @@ def _base_records(
 ) -> list[dict[str, object]]:
     records = []
     for base in node.bases:
-        name = _dotted_name(base) or _unparse(base) or "?"
+        name = dotted_name(base) or _unparse(base) or "?"
         records.append(
             {
                 "name": name,
@@ -399,12 +400,6 @@ def _param_record(
     }
 
 
-def _self_assignments(
-    method: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> list[tuple[str, ast.AST]]:
-    return SelfAssignmentVisitor().collect(method)
-
-
 def _field_record(
     field_name: str,
     value: ast.AST,
@@ -436,7 +431,7 @@ def _field_record(
         return record
 
     if isinstance(value, ast.Call):
-        call_name = _dotted_name(value.func) or "call"
+        call_name = dotted_name(value.func) or "call"
         collaborator_id = _resolve_call_target(call_name, class_by_name)
         record.update(
             {
@@ -495,19 +490,6 @@ def _resolve_annotation_target(
 def _resolve_call_target(call_name: str, class_by_name: dict[str, str]) -> str | None:
     name = call_name.split(".")[-1]
     return class_by_name.get(name)
-
-
-def _dotted_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        parent = _dotted_name(node.value)
-        return f"{parent}.{node.attr}" if parent else node.attr
-    if isinstance(node, ast.Call):
-        return _dotted_name(node.func)
-    if isinstance(node, ast.Subscript):
-        return _dotted_name(node.value)
-    return None
 
 
 def _unparse(node: ast.AST | None) -> str | None:

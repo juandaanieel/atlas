@@ -7,3 +7,6 @@ three/build/three.module.js:
    * Copyright 2010-2026 Three.js Authors
    * SPDX-License-Identifier: MIT
    */
+
+markdown-it/dist/markdown-it.mjs:
+  /*! markdown-it 15.0.2 https://github.com/markdown-it/markdown-it @license MIT */

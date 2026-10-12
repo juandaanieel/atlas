@@ -10,6 +10,58 @@ from atlas.analyzer.payload import analyze_path
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_nested_scopes_do_not_leak_imports_or_hide_local_bindings(tmp_path):
+    (tmp_path / "sample.py").write_text(
+        """from math import sin as hidden
+
+def outer():
+    async def hidden():
+        from math import cos as nested_import
+    class Local:
+        from math import tan as class_import
+    return hidden(), nested_import(), class_import()
+""",
+        encoding="utf-8",
+    )
+    calls = analyze_path(tmp_path)["calls"]
+
+    assert [(call["source"], call["called_name"], call["kind"]) for call in calls] == [
+        ("sample.outer", "class_import", "unresolved"),
+        ("sample.outer", "hidden", "unresolved"),
+        ("sample.outer", "nested_import", "unresolved"),
+    ]
+
+
+def test_overview_counts_unresolved_calls_by_file_and_breaks_ties_by_id(tmp_path):
+    for name, count in (("a", 1), ("b", 2), ("c", 1)):
+        (tmp_path / f"{name}.py").write_text(
+            "def run():\n" + "    missing()\n" * count,
+            encoding="utf-8",
+        )
+    overview = analyze_path(tmp_path)["overview"]
+
+    assert overview["unresolved_call_count"] == 4
+    assert overview["files_with_most_unresolved"] == [
+        {"file_id": "b.py", "unresolved_calls": 2},
+        {"file_id": "a.py", "unresolved_calls": 1},
+        {"file_id": "c.py", "unresolved_calls": 1},
+    ]
+    assert [symbol["id"] for symbol in overview["most_connected_functions"]] == [
+        "b.run", "a.run", "c.run",
+    ]
+
+
+def test_overview_preserves_first_source_for_duplicate_symbol_ids(tmp_path):
+    (tmp_path / "same.py").write_text("def run():\n    missing()\n", encoding="utf-8")
+    package = tmp_path / "same"
+    package.mkdir()
+    (package / "__init__.py").write_text("def run():\n    missing()\n", encoding="utf-8")
+
+    assert analyze_path(tmp_path)["overview"]["files_with_most_unresolved"] == [
+        {"file_id": "same.py", "unresolved_calls": 2},
+    ]
+
+
 def test_payload_contains_same_file_and_cross_file_calls():
     payload = analyze_path(FIXTURES / "simple_package")
 

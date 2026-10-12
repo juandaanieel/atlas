@@ -112,7 +112,10 @@ def story_for_snapshot(root: str | Path, snapshot: AnalysisSnapshot | Mapping) -
     if authored_path.exists():
         return load_story(authored_path, snapshot)
     focus_path = folder / FOCUS_FILE
-    focus = load_focus(focus_path, snapshot) if focus_path.exists() else None
+    focus = None
+    if focus_path.exists():
+        focus = _read_json(focus_path, "focus")
+        validate_focus(focus, snapshot)
     return build_story(snapshot, focus)
 
 
@@ -121,13 +124,6 @@ def load_story(path: str | Path, snapshot: AnalysisSnapshot | Mapping) -> dict:
     story = _read_json(path, "story")
     validate_story(story, snapshot)
     return story
-
-
-def load_focus(path: str | Path, snapshot: AnalysisSnapshot | Mapping) -> dict:
-    """Load and validate the human-authored focus list for the default guide."""
-    focus = _read_json(path, "focus")
-    validate_focus(focus, snapshot)
-    return focus
 
 
 def _read_json(path: str | Path, label: str) -> object:
@@ -639,26 +635,22 @@ def _subject(document: dict, item_id: str) -> dict:
     function_by_id = _function_by_id(document)
     function = function_by_id.get(item_id)
     if function is not None:
-        return {
-            "id": item_id,
-            "kind": function["kind"],
-            "label": _label(function),
-            "docstring_summary": function["docstring_summary"],
-            "exported_from": function["exported_from"],
-            "root": item_id,
-            "root_label": _label(function),
-        }
-    item = next(item for item in document["objects"] if item["id"] == item_id)
-    constructor = function_by_id.get(item["constructor"]["method_id"])
-    analysed = constructor is not None and constructor["in_static_map"]
+        item, kind, root, root_label = function, function["kind"], item_id, _label(function)
+    else:
+        item = next(item for item in document["objects"] if item["id"] == item_id)
+        constructor = function_by_id.get(item["constructor"]["method_id"])
+        analysed = constructor is not None and constructor["in_static_map"]
+        kind = "class"
+        root = constructor["id"] if analysed else None
+        root_label = _label(constructor) if analysed else None
     return {
         "id": item_id,
-        "kind": "class",
+        "kind": kind,
         "label": _label(item),
         "docstring_summary": item["docstring_summary"],
         "exported_from": item["exported_from"],
-        "root": constructor["id"] if analysed else None,
-        "root_label": _label(constructor) if analysed else None,
+        "root": root,
+        "root_label": root_label,
     }
 
 
@@ -690,15 +682,15 @@ def _entry_function(functions: list[dict], pipeline: dict | None) -> dict | None
     if pipeline:
         return by_id[pipeline["root"]]
     mapped = [item for item in functions if item["in_static_map"]]
-    roots = sorted((item for item in mapped if item["is_root"]), key=lambda item: item["id"])
-    return roots[0] if roots else mapped[0] if mapped else None
+    root = min((item for item in mapped if item["is_root"]), key=lambda item: item["id"], default=None)
+    return root or (mapped[0] if mapped else None)
 
 
 def _most_connected_function(functions: list[dict]) -> dict | None:
     candidates = [item for item in functions if not item["is_test"]]
     if not candidates:
         return None
-    return sorted(
+    return min(
         candidates,
         key=lambda item: (
             -(item["fan_in"] + item["fan_out"]),
@@ -706,7 +698,7 @@ def _most_connected_function(functions: list[dict]) -> dict | None:
             -item["fan_out"],
             item["id"],
         ),
-    )[0]
+    )
 
 
 def _most_stateful_object(objects: list[dict]) -> dict | None:
@@ -717,14 +709,14 @@ def _most_stateful_object(objects: list[dict]) -> dict | None:
     ]
     if not candidates:
         return None
-    return sorted(
+    return min(
         candidates,
         key=lambda item: (
             -len(item["fields"]),
             -(len(item["methods"]["public"]) + len(item["methods"]["private"])),
             item["id"],
         ),
-    )[0]
+    )
 
 
 def _review_target(document: dict) -> dict | None:
@@ -758,10 +750,10 @@ def _review_target(document: dict) -> dict | None:
     ]
     if not review_candidates:
         return None
-    return sorted(
+    return min(
         review_candidates,
         key=lambda item: tuple(-value for value in score(item)) + (item["id"],),
-    )[0]
+    )
 
 
 def _call_map(model: dict) -> dict[str, list[str]]:
@@ -858,9 +850,10 @@ def _validate_evidence(evidence: object, references: dict, label: str) -> None:
 
 def _story_references(document: dict) -> dict:
     tree = document["model"]["tree"]
+    scopes, modules = _tree_references(tree)
     return {
-        "scopes": _tree_paths(tree),
-        "modules": _tree_modules(tree),
+        "scopes": scopes,
+        "modules": modules,
         "nodes": {item["id"] for item in document["model"]["nodes"]},
         "symbols": {item["id"] for item in document["symbols"]},
         "objects": {item["id"] for item in document["objects"]},
@@ -868,18 +861,15 @@ def _story_references(document: dict) -> dict:
     }
 
 
-def _tree_paths(tree: dict) -> set[str]:
-    paths = {tree["path"]}
-    for child in tree["children"]:
-        paths.update(_tree_paths(child))
-    return paths
-
-
-def _tree_modules(tree: dict) -> set[str]:
-    modules = {tree["module"]} if tree["module"] else set()
-    for child in tree["children"]:
-        modules.update(_tree_modules(child))
-    return modules
+def _tree_references(tree: dict) -> tuple[set[str], set[str]]:
+    paths, modules, pending = set(), set(), [tree]
+    while pending:
+        node = pending.pop()
+        paths.add(node["path"])
+        if node["module"]:
+            modules.add(node["module"])
+        pending.extend(node["children"])
+    return paths, modules
 
 
 def _has_directed_path(edges: list[dict], start: str, end: str) -> bool:

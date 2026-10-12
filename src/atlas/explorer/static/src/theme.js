@@ -1,4 +1,4 @@
-// Atlas Strata themes (docs/plans/strata-theme.md). Two token sets built from GitHub
+// Atlas Strata themes. Two token sets built from GitHub
 // Primer's high-contrast themes, @primer/primitives 11.10.0:
 //   neutrals  src/tokens/base/color/dark/dark.json5, src/tokens/base/color/light/light.json5
 //   hues      src/tokens/base/color/dark/dark.high-contrast.json5,
@@ -112,8 +112,6 @@ function derive(t) {
     halo: rgba(c.canvas, 0.92), backdrop: rgba(c.canvas, 0.88), pill: rgba(c.canvas, 0.94),
     pillLine: rgba(c.emphasis, 0.35), pillLineStrong: rgba(c.emphasis, 0.6),
     tooltip: dark ? rgba(c.raised, 0.96) : rgba(c.canvas, 0.97), tooltipLine: c.edge,
-    hatch: dark ? rgba(c.link, 0.55) : rgba(c.link, 0.5),
-    hatchKey: dark ? rgba(c.link, 0.75) : rgba(c.link, 0.7),
     // pulses: additive light on the dark canvas, plain dark ink on the light one
     pulseAdditive: dark,
   };
@@ -126,6 +124,6 @@ export const THEME_KEY = 'atlas.theme';
 export function initialTheme() {
   const q = new URLSearchParams(location.search).get('theme');
   if (q === 'dark' || q === 'light') return q;
-  try { const s = localStorage.getItem(THEME_KEY); if (s === 'dark' || s === 'light') return s; } catch (e) { /* storage off */ }
+  try { const s = localStorage.getItem(THEME_KEY); if (s === 'dark' || s === 'light') return s; } catch { /* storage off */ }
   return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }

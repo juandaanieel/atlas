@@ -2,7 +2,6 @@ from __future__ import annotations
 
 
 ENTRYPOINT_NAMES = {"main", "run", "cli", "app"}
-LARGE_FUNCTION_LOC = 50
 MANY_OUTGOING_CALLS = 8
 
 

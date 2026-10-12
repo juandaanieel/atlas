@@ -12,10 +12,10 @@ from urllib.parse import parse_qs, urlparse
 
 from atlas.analyzer.payload import load_payload
 from atlas.dashboard.jobs import ACTIVE_STATES, RefreshJobs
-from atlas.dashboard.registry import ProjectRegistry, default_state_directory
+from atlas.dashboard.registry import ProjectRegistry
 from atlas.explorer.writer import ASSETS
 from atlas.explorer.writer import STATIC_DIR as EXPLORER_STATIC_DIR
-from atlas.explorer.writer import render_explorer
+from atlas.explorer.writer import render_explorer, script_safe_json
 from atlas.story import story_for_snapshot
 
 
@@ -58,9 +58,6 @@ class DashboardApplication:
             projects.append(item)
         return projects
 
-    def close(self) -> None:
-        self.jobs.close()
-
 
 class AtlasDashboardServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -74,7 +71,7 @@ def create_dashboard_server(
     timeout_seconds: int = 900,
 ) -> tuple[AtlasDashboardServer, DashboardApplication]:
     application = DashboardApplication(
-        state_dir or default_state_directory(),
+        state_dir or Path.home() / ".atlas" / "dashboard",
         timeout_seconds=timeout_seconds,
     )
     server = AtlasDashboardServer(
@@ -110,7 +107,7 @@ def serve_dashboard(
         pass
     finally:
         server.server_close()
-        application.close()
+        application.jobs.close()
 
 
 def _handler_for(application: DashboardApplication):
@@ -150,10 +147,7 @@ def _handler_for(application: DashboardApplication):
                 self._json(200, {"job": job})
                 return
             if route.startswith("/dashboard/"):
-                self._static_file(
-                    DASHBOARD_STATIC_DIR,
-                    route.removeprefix("/dashboard/"),
-                )
+                self._static_file(route.removeprefix("/dashboard/"))
                 return
             if route.startswith("/assets/"):
                 self._explorer_asset(route.removeprefix("/assets/"))
@@ -206,7 +200,7 @@ def _handler_for(application: DashboardApplication):
             except KeyError:
                 self._json_error(404, "Project was not found")
                 return
-            except (OSError, ValueError, json.JSONDecodeError) as error:
+            except (OSError, ValueError) as error:
                 self._json_error(400, str(error))
                 return
             self._json_error(404, "Not found")
@@ -252,16 +246,14 @@ def _handler_for(application: DashboardApplication):
                 ):
                     self._json_error(403, "Use the private dashboard URL printed by Atlas")
                     return
-                self._redirect("/", set_cookie=True)
+                self._send_bytes(
+                    b"", "text/plain; charset=utf-8",
+                    status=303, location="/", set_cookie=True,
+                )
                 return
 
             nonce = secrets.token_urlsafe(18)
-            config = _script_safe_json(
-                {
-                    "token": application.session_token,
-                    "currentProjectId": None,
-                }
-            )
+            config = script_safe_json({"token": application.session_token})
             source = (DASHBOARD_STATIC_DIR / "index.html").read_text(encoding="utf-8")
             source = source.replace("__ATLAS_NONCE__", nonce).replace(
                 "__ATLAS_DASHBOARD_CONFIG__",
@@ -306,17 +298,18 @@ def _handler_for(application: DashboardApplication):
                 return
             self._send_bytes(path.read_bytes(), _content_type(path))
 
-        def _static_file(self, root: Path, relative: str) -> None:
+        def _static_file(self, relative: str) -> None:
             allowed = {
                 "dashboard.css",
                 "dashboard.js",
+                "api.js",
                 "project.css",
                 "project.js",
             }
             if relative not in allowed:
                 self._json_error(404, "Asset was not found")
                 return
-            path = root / relative
+            path = DASHBOARD_STATIC_DIR / relative
             self._send_bytes(path.read_bytes(), _content_type(path))
 
         def _read_json(self) -> dict:
@@ -365,27 +358,16 @@ def _handler_for(application: DashboardApplication):
                 )
             )
 
-        def _redirect(self, location: str, *, set_cookie: bool = False) -> None:
-            self._send_bytes(
-                b"",
-                "text/plain; charset=utf-8",
-                status=303,
-                set_cookie=set_cookie,
-                location=location,
-            )
-
         def _html(
             self,
             source: str,
             *,
             nonce: str,
-            set_cookie: bool = False,
         ) -> None:
             self._send_bytes(
                 source.encode("utf-8"),
                 "text/html; charset=utf-8",
                 nonce=nonce,
-                set_cookie=set_cookie,
             )
 
         def _json(self, status: int, document: dict) -> None:
@@ -462,7 +444,7 @@ def _central_explorer_page(snapshot, story: dict, project: dict, token: str, non
     )
     source = source.replace(
         "</body>",
-        '<script src="/dashboard/project.js"></script>\n</body>',
+        '<script type="module" src="/dashboard/project.js"></script>\n</body>',
     )
     return source.replace(
         "<title>Atlas Explorer</title>",
@@ -494,7 +476,7 @@ def _unavailable_project_page(
       <p>{message}</p>
       <button id="unavailableRefresh" type="button">Update project</button>
     </main>
-    <script src="/dashboard/project.js"></script>
+    <script type="module" src="/dashboard/project.js"></script>
   </body>
 </html>"""
 
@@ -512,7 +494,7 @@ def _project_bar(project: dict) -> str:
 
 
 def _dashboard_config_script(project_id: str, token: str, nonce: str) -> str:
-    config = _script_safe_json(
+    config = script_safe_json(
         {
             "token": token,
             "currentProjectId": project_id,
@@ -522,15 +504,6 @@ def _dashboard_config_script(project_id: str, token: str, nonce: str) -> str:
         f'<script nonce="{nonce}">'
         f"window.ATLAS_DASHBOARD = {config};"
         "</script>"
-    )
-
-
-def _script_safe_json(document: dict) -> str:
-    return (
-        json.dumps(document, sort_keys=True)
-        .replace("&", "\\u0026")
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
     )
 
 

@@ -17,3 +17,4 @@ htmlcov/
 node_modules/
 prototypes/
 test-results/
+public/

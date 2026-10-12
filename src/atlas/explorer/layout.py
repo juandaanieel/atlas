@@ -14,23 +14,21 @@ BOX_W, BOX_HEAD, BOX_ROW, BOX_FIELD, BOX_TAIL, BOX_D = 2.1, 0.40, 0.24, 0.21, 0.
 DIST_PAD, GROUND_GAP, BASEMENT_GAP = 0.45, 0.55, 0.9
 EXPAND_LIFT = 1.4
 # Ground plan. The flow axis is +z: callers stand at the back, callees toward
-# the reader. Rows are ROW_GAP apart; plates in one row are STREET apart.
+# the reader. Row spacing clears the preceding boxes in the default axonometric view.
 ROW_GAP, STREET = 13.0, 1.6
 # A plate covers z from (row z - PLATE_BACK) to (row z + PLATE_FRONT); panes
 # stand on the row line, the front strip carries labels and in-row imports.
 PLATE_BACK, PLATE_FRONT = 1.3, 2.6
 IMPORT_WEIGHT = 0.5  # an import without a resolved call counts half a call
 CROSS_WEIGHT = 2.0  # one crossing of in-plate arcs costs 2 units of call-weighted span
-SLICE = "·"  # package·1, package·2: slices of a package split by the cycle rule
 # Module boxes (surface track). A module is a box in the class block's family:
-# header, one row per public name, a "more" band, a hatched tail for the
+# header, one row per public name, a "more" band, a muted bottom band for the
 # internals, ghost rows for the dead. Every box hangs from the entry surface
 # (y = 0); the ground sits just under the tallest box. An unfolded box grows
 # down into its pane (one column of cards on the module's own depth floors).
 BOX_HEADER, MOD_TAIL, MOD_D, BOX_FOOT, GHOST_GAP = 0.62, 0.28, 0.36, 0.06, 0.1
 WRAP_LINES = 3  # a name wraps after an underscore or before a capital, in at most 3 lines
-# Type calibration (strata-v2: the surface track's boxes at the hierarchy track's
-# type floor). Every row of a box must carry its whole name at 9 px or more when
+# Type calibration. Every row of a box must carry its whole name at 9 px or more when
 # its package is scoped face-on at 1280 x 800, where the picture between the
 # 300 px left panel and the right edge is about FRAME_PX wide. A package of n
 # modules spreads them across that width, so each package takes the longest line
@@ -39,7 +37,6 @@ WRAP_LINES = 3  # a name wraps after an underscore or before a capital, in at mo
 # pitch and row height then follow from the smallest scale of any package.
 FRAME_PX, TYPE_FLOOR, CHAR_EM, LINE_ROOM = 880.0, 9.0, 0.63, 1.12
 SCALE_CAP = 60.0  # px per unit: a small package's scope is bound by height, not by width
-SCALE_CAP_SPLIT = 36.0  # a package split over rows is scoped from the raised Elevation, bound by height
 STUB_STREET = 3.2  # a package scope keeps the street of each side port its row stubs use in frame
 CHAR_PX = TYPE_FLOOR * CHAR_EM  # one character at the floor, with a margin over the 0.6 em mono advance
 LINE_MIN, LINE_MAX = 7, 18
@@ -52,7 +49,7 @@ ROW_CAP, GHOST_CAP = 6, 3
 MOD_W_MIN, MOD_W_MAX = 2.0, 3.8  # box width from its longest label line, at its package's scale
 GUTTER = 0.24  # each side of a box: calls enter on the left, leave on the right
 ARC_MARGIN = 0.6  # unfolded pane: left margin for the arc diagram of calls inside the module
-# strata-lines: the margin holds one lane per overlapping call inside the module (interval
+# The margin holds one lane per overlapping call inside the module (interval
 # colouring, shortest first). A module whose calls need more lanes than ARC_MARGIN holds at
 # MARGIN_LANE apart gets a wider margin, taken from its cards (never below CARD_MIN_W, the
 # width of a CARD_LINE card line); the box keeps its width, so the placement does not move.
@@ -80,8 +77,7 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
     layout = model["layout"]
     nodes = {n["id"]: n for n in model["nodes"]}
     wrappers = set(model["wrappers"])
-    files = {f["module"]: f for f in snapshot["files"]}
-    test_modules = {m for m, f in files.items() if f["is_test"]}
+    test_modules = {f["module"] for f in snapshot["files"] if f["is_test"]}
     symbols = {s["id"]: s for s in snapshot["symbols"]}
 
     clone_of = {}
@@ -109,8 +105,8 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
             "module": ob["module"],
             "line": ob["line_start"],
             "doc": ob["docstring_summary"],
-            "exported": bool(ob.get("exported", False)),  # snapshot v8
-            "exported_from": list(ob.get("exported_from") or []),
+            "exported": ob["exported"],
+            "exported_from": ob["exported_from"],
             "ctor": ctor if ctor in nodes else None,
             "public": public,
             "private": [m for m in private if not nodes[m]["dead"]],
@@ -125,8 +121,7 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
         for m in public + private:
             class_of[m] = ob["id"]
 
-    # v7: Python's layout carries the call-depth row of every free card and
-    # every class box (longest path from a root after cycle breaking).
+    # The analyzer layout carries the call-depth row of every free card and class box.
     dead_row = layout["dead_row"]
     rank = {nid: cell["row"] for nid, cell in layout["nodes"].items() if cell["row"] != dead_row}
     class_rank = {cid: min(layout["classes"][cid]["row"], dead_row - 1) for cid in classes}
@@ -152,7 +147,7 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
             ext_in[t] += 1
             if class_of.get(t):
                 ext_in[class_of[t]] += 1
-    same_calls = defaultdict(set)  # strata-lines: calls inside one module (margin lanes)
+    same_calls = defaultdict(set)  # calls inside one module (margin lanes)
     for e in model["edges"]:
         s_, t_ = e["source"], e["target"]
         if s_ not in nodes or (t_ not in nodes and t_ not in classes) or e["kind"] == "intra_class":
@@ -166,7 +161,6 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
     boxes = {m: box_layout(m, F0, ext_in, calib["line"][package_of[m]], calib["char_u"][package_of[m]], calib["pitch"][package_of[m]]) for m in pane_modules}
     panes = {m: {"width": round(b["w"] + 2 * GUTTER, 3), "box": b} for m, b in boxes.items()}
     floors = {"ground": max(b["box_h"] for b in boxes.values()) + SURFACE_GROUND_GAP}  # positive-down
-    dead_by_pane = {m: [i for i in nodes if nodes[i]["module"] == m and nodes[i]["dead"]] for m in pane_modules}
     boxes_by_pane = defaultdict(list)
     for cid, cl in classes.items():
         boxes_by_pane[cl["module"]].append(cid)
@@ -180,7 +174,7 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
             calls[(a, t)] += b["count"]
     imports = sorted({(a, t) for a, t in layout["imports"] if a in pm and t in pm and a != t})
     cycle_pairs = {tuple(p) for p in layout["import_cycles"]}
-    succ, dropped = module_dag(pane_modules, calls, imports)
+    succ = dependency_dag(pane_modules, calls, imports)
     weight = defaultdict(lambda: defaultdict(float))  # undirected affinity
     for (a, t), c in calls.items():
         weight[a][t] += c
@@ -192,7 +186,7 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
     level = module_levels(pane_modules, succ, calls, package_of)
 
     return {
-        "snapshot": snapshot,
+        "snapshot_id": snapshot["snapshot_id"],
         "model": model,
         "nodes": nodes,
         "classes": classes,
@@ -202,7 +196,6 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
         "wrappers": wrappers,
         "clone_of": clone_of,
         "symbols": symbols,
-        "test_modules": test_modules,
         "pane_modules": pane_modules,
         "package_of": package_of,
         "packages": packages,
@@ -210,17 +203,14 @@ def analyse(snapshot: dict, frame_extra: dict | None = None) -> dict:
         "modules_by_package": modules_by_package,
         "panes": panes,
         "floors": floors,
-        "dead_by_pane": dead_by_pane,
         "boxes_by_pane": boxes_by_pane,
         "calls": dict(calls),
         "imports": imports,
         "cycle_pairs": cycle_pairs,
         "succ": succ,
-        "dropped": dropped,
         "weight": weight,
         "level": level,
         "width": {m: panes[m]["width"] for m in pane_modules},
-        "calib": calib,
     }
 
 
@@ -246,7 +236,7 @@ def calibrate_type(modules_by_package, F0, ext_in, frame_extra):
             for _ in range(60):
                 widths = [max(MOD_W_MIN, need[m], TEXT_PAD + longest[m] * c) for m in mods]
                 frame_w = sum(w + 2 * GUTTER for w in widths) + (len(mods) - 1) * PANE_GAP + frame_extra.get(p, 2 * DIST_PAD)
-                c_new = min(1.0, CHAR_PX / min(FRAME_PX / frame_w, SCALE_CAP_SPLIT if p in frame_extra.get("split", ()) else SCALE_CAP))
+                c_new = min(1.0, CHAR_PX / min(FRAME_PX / frame_w, SCALE_CAP))
                 if abs(c_new - c) < 1e-6:
                     c = c_new
                     break
@@ -287,7 +277,7 @@ def wrap_name(name, width):
 
 
 def column_lanes(seq, calls, classes):
-    """Margin lanes of the calls inside one unfolded module (strata-lines).
+    """Margin lanes of calls inside one unfolded module.
 
     seq: the pane's column top to bottom, ("class", id) or ("fn", id); calls: (s, t)
     pairs inside the module. A call spans the column between its two ends (a class
@@ -374,16 +364,15 @@ def box_layout(m, F, ext_in, line_chars, char_u, pitch):
             lines = wrap_name(n["name"], line_chars)
             h = (MOD_WRAP if key in wrappers else MOD_ROW) + pitch * (len(lines) - 1)
             rows.append({"slot": f"r{k}", "kind": "fn", "id": key, "name": n["name"], "lines": lines, "y": round(d, 3), "h": round(h, 3),
-                         "root": n["is_root"], "exported": bool(n.get("exported", False)), "lb": n["load_bearing"], "clone": key in clone_of, "wrapper": key in wrappers})
+                         "exported": n["exported"], "lb": n["load_bearing"], "clone": key in clone_of, "wrapper": key in wrappers})
             slot_of[key] = f"r{k}"
         else:
             cl = classes[key]
             members = cl["public"] + cl["private"] + cl["dead_private"]
             s = signals(members)
-            root = any(nodes[x]["is_root"] for x in cl["public"])
             lines = wrap_name(cl["name"], line_chars)
             rows.append({"slot": f"r{k}", "kind": "class", "id": key, "name": cl["name"], "lines": lines, "y": round(d, 3), "h": round(MOD_ROW + pitch * (len(lines) - 1), 3),
-                         "root": root, "exported": cl["exported"], "lb": s["lb"], "clone": s["clone"], "wrapper": False, "data_only": cl["data_only"]})
+                         "exported": cl["exported"], "lb": s["lb"], "clone": s["clone"], "wrapper": False, "data_only": cl["data_only"]})
             slot_of[key] = f"r{k}"
             for x in members:
                 if not nodes[x]["dead"]:
@@ -448,7 +437,6 @@ def box_layout(m, F, ext_in, line_chars, char_u, pitch):
     # ---- unfolded pane: one column of cards on the module's own depth floors
     free = [i for i in ids if i not in class_of and not nodes[i]["dead"]]
     ranks = sorted({rank[i] for i in free} | {class_rank[c] for c in cids})
-    dead = [i for i in ids if nodes[i]["dead"]]
     seq = []
     for r in ranks:
         seq += [("class", c) for c in cids if class_rank[c] == r] + [("fn", i) for i in free if rank[i] == r]
@@ -508,14 +496,10 @@ def class_box_height(cl, expanded=False):
 # ============================================================== module graph
 
 
-def module_dag(modules, calls, imports):
+def dependency_dag(modules, calls, imports):
     """Calls first (heaviest first), then imports, each kept only if it closes no cycle.
-
-    Returns the successor sets and the pairs dropped to keep the graph acyclic.
-    Tempura drops none: it has no import cycle and no call against an import.
     """
     succ = {m: set() for m in modules}
-    dropped = []
 
     def reaches(a, b):
         seen, stack = {a}, [a]
@@ -531,17 +515,15 @@ def module_dag(modules, calls, imports):
 
     for (a, t), _ in sorted(calls.items(), key=lambda kv: (-kv[1], kv[0])):
         if reaches(t, a):
-            dropped.append(("call", a, t))
             continue
         succ[a].add(t)
     for a, t in imports:
         if t in succ[a]:
             continue
         if reaches(t, a):
-            dropped.append(("import", a, t))
             continue
         succ[a].add(t)
-    return succ, dropped
+    return succ
 
 
 def module_levels(modules, succ, calls, package_of):
@@ -668,13 +650,7 @@ def pack_plates(row, bary, x, row_of, i, F, unit_of):
     keeps the plate order.
     """
     local = compact_row(row, F, unit_of)
-    runs, run = [], []
-    for m in row + [None]:
-        if run and (m is None or unit_of[m] != unit_of[run[0]]):
-            runs.append(run)
-            run = []
-        if m is not None:
-            run.append(m)
+    runs = [list(run) for _, run in itertools.groupby(row, unit_of.__getitem__)]
     centre, half, target = [], [], []
     for r in runs:
         lo = local[r[0]] - F["width"][r[0]] / 2
@@ -774,96 +750,24 @@ def flow_order(order, F):
     return min(results, key=lambda r: r[0])[1]
 
 
-def unit_graph(units, F):
-    """Edges between units (calls and imports kept in the module DAG)."""
-    unit_of = {m: u for u, ms in units.items() for m in ms}
-    edges = set()
-    for a in F["pane_modules"]:
-        for t in F["succ"][a]:
-            if unit_of[a] != unit_of[t]:
-                edges.add((unit_of[a], unit_of[t]))
-    return edges
-
-
-def cyclic_units(units, F):
-    """Units on a cycle of the unit graph."""
-    out = defaultdict(set)
-    for a, b in unit_graph(units, F):
-        out[a].add(b)
-
-    def reach(u):
-        seen, stack = set(), [u]
-        while stack:
-            for v in out[stack.pop()]:
-                if v not in seen:
-                    seen.add(v)
-                    stack.append(v)
-        return seen
-
-    return {u for u in units if u in reach(u)}
-
-
-def make_units(F):
-    """Packages, except that a package on a package-level cycle splits by level.
-
-    While the unit graph has a cycle, try every cut of every unit on a cycle
-    into a top slice (levels up to t) and a base slice (deeper levels). Keep
-    the cut that leaves the fewest units on cycles, then cuts the least
-    call weight between the slices, then splits most evenly, then the first
-    in tree order. Slices are named package·1, package·2 from the top.
-    """
-    lv, tix = F["level"], F["tree_index"]
-    units = {p: list(F["modules_by_package"][p]) for p in F["packages"]}
-    while True:
-        cyc = cyclic_units(units, F)
-        if not cyc:
-            return units
-        best = None
-        for u in sorted(cyc, key=lambda u: tix[units[u][0]]):
-            for t in sorted({lv[m] for m in units[u]})[:-1]:
-                top = [m for m in units[u] if lv[m] <= t]
-                base = [m for m in units[u] if lv[m] > t]
-                trial = {k: v for k, v in units.items() if k != u}
-                trial[u + SLICE + "1"], trial[u + SLICE + "2"] = top, base
-                cut = sum(F["weight"][a].get(b, 0.0) for a in top for b in base)
-                key = (len(cyclic_units(trial, F)), cut, abs(len(top) - len(base)), tix[units[u][0]], t)
-                if best is None or key < best[0]:
-                    best = (key, u, top, base)
-        _, u, top, base = best
-        stem = u.split(SLICE)[0]
-        slices = [k for k in units if k.split(SLICE)[0] == stem and k != u]
-        order = []
-        for k in list(units):
-            if k == u:
-                order += [("top", top), ("base", base)]
-            elif k in slices:
-                order.append((k, units[k]))
-        for k in slices:
-            units.pop(k)
-        units.pop(u)
-        for n, (_, ms) in enumerate(sorted(order, key=lambda kv: min(lv[m] for m in kv[1])), 1):
-            units[f"{stem}{SLICE}{n}"] = ms
-
-
-RULE = [
-    "units = packages; a package on a cycle of the package graph splits into level slices (package·1 at the top, package·2 below)",
-    "plates (one per unit) in a topological order of the unit graph, lowest mean module level first among ready units; wrapped into rows by width; first row at the back",
-    "inside a plate, a topological order of its calls and imports (callers left of callees) with cost = 2 x arc crossings + call-weighted span in uniform slots (box widths never reorder a plate); level-order and depth-first starts improved by single-module moves",
-    "plates are rigid; an isotonic fit slides each plate along its row toward the barycentre of its links to other rows",
-    "flow is reading order: back to front between rows, left to right inside a row",
-]
-
-
 def place(F):
     """Placement B: package plates in dependency order."""
     lv, tix = F["level"], F["tree_index"]
-    units = make_units(F)
+    # A package is always one contiguous unit, even when package dependencies cycle.
+    units = F["modules_by_package"]
+    package_of = F["package_of"]
+    calls = defaultdict(int)
+    for (a, b), count in F["calls"].items():
+        if package_of[a] != package_of[b]:
+            calls[package_of[a], package_of[b]] += count
+    imports = sorted({(package_of[a], package_of[b]) for a, b in F["imports"] if package_of[a] != package_of[b]})
+    # Use the strongest dependencies for placement; all edges remain in the rendered map.
+    succ = dependency_dag(list(units), calls, imports)
     unit_of = {m: u for u, ms in units.items() for m in ms}
     first = {u: min(tix[m] for m in ms) for u, ms in units.items()}
     mean = {u: sum(lv[m] for m in ms) / len(ms) for u, ms in units.items()}
-    # topological order of the (now acyclic) unit graph; among ready units the
-    # lowest mean level first, then tree order
-    edges = sorted(unit_graph(units, F))
+    # Topological order of the layout graph; ties follow mean module depth and tree order.
+    edges = sorted((a, b) for a in units for b in succ[a])
     indeg = {u: 0 for u in units}
     for a, b in edges:
         indeg[b] += 1
@@ -906,28 +810,30 @@ def place(F):
     lo = min(x[m] - F["width"][m] / 2 for m in x)
     hi = max(x[m] + F["width"][m] / 2 for m in x)
     x = {m: v - (lo + hi) / 2 for m, v in x.items()}
+    # The projected height of the back row must clear the next row's header.
+    # 0.82 radians is the default axonometric elevation in the renderer.
+    row_z = [0.0]
+    for row in rows[:-1]:
+        height = max(F["panes"][m]["box"]["box_h"] for m in row)
+        row_z.append(round(row_z[-1] + max(ROW_GAP, (height + 2) / math.tan(0.82) + PLATE_FRONT + PLATE_BACK), 3))
     plates = []
     for i, row in enumerate(rows):
-        run = []
-        for m in row + [None]:
-            if run and (m is None or unit_of[m] != unit_of[run[0]]):
-                left = x[run[0]] - F["width"][run[0]] / 2 - DIST_PAD
-                right = x[run[-1]] + F["width"][run[-1]] / 2 + DIST_PAD
-                plates.append({"package": F["package_of"][run[0]], "unit": unit_of[run[0]], "row": i, "x": round(left, 3), "z": i * ROW_GAP, "w": round(right - left, 3), "modules": list(run)})
-                run = []
-            if m is not None:
-                run.append(m)
-    return {"rows": rows, "centre": x, "z": {m: row_of[m] * ROW_GAP for m in row_of}, "plates": plates, "unit_of": unit_of, "plate_order": order}
+        for _, grouped in itertools.groupby(row, unit_of.__getitem__):
+            run = list(grouped)
+            left = x[run[0]] - F["width"][run[0]] / 2 - DIST_PAD
+            right = x[run[-1]] + F["width"][run[-1]] / 2 + DIST_PAD
+            plates.append({"package": F["package_of"][run[0]], "unit": unit_of[run[0]], "row": i, "x": round(left, 3), "z": row_z[i], "w": round(right - left, 3), "modules": list(run)})
+    return {"rows": rows, "centre": x, "z": {m: row_z[row_of[m]] for m in row_of}, "plates": plates, "unit_of": unit_of, "row_of": row_of}
 
 
 def scope_extra(F, P):
     """Per package: the scope frame's width beyond its modules' slots, on this placement.
 
-    The frame spans the package's plates (a split package spans both slices) and,
+    The frame spans the package's plate and,
     for each plate side a row stub leaves through, STUB_STREET more (the browser
     keeps the street and its port label in view).
     """
-    unit_of, row_of = P["unit_of"], {m: i for i, r in enumerate(P["rows"]) for m in r}
+    unit_of, row_of = P["unit_of"], P["row_of"]
     plate = {pl["unit"]: pl for pl in P["plates"]}
     out = {}
     for p, mods in F["modules_by_package"].items():
@@ -948,8 +854,6 @@ def scope_extra(F, P):
                 lo = min(lo, plate[u]["x"] - STUB_STREET)
         slots = sum(F["width"][m] for m in mods) + (len(mods) - 1) * PANE_GAP
         out[p] = round(hi - lo - slots, 3)
-    # packages whose plates stand in more than one row (a split package)
-    out["split"] = sorted(p for p, mods in F["modules_by_package"].items() if len({row_of[m] for m in mods}) > 1)
     return out
 
 
@@ -971,7 +875,6 @@ def plate_ports(F, P):
     """
     plate_of = {m: k for k, pl in enumerate(P["plates"]) for m in pl["modules"]}
     use = defaultdict(lambda: defaultdict(list))  # plate -> port -> [(x, w)]
-    count = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # plate -> port -> [out, in]
     for a in F["pane_modules"]:
         for t in sorted(F["succ"][a]):
             pa, pt = plate_of[a], plate_of[t]
@@ -989,8 +892,6 @@ def plate_ports(F, P):
                 ports = ("left", "right")
             use[pa][ports[0]].append((P["centre"][a], w))
             use[pt][ports[1]].append((P["centre"][t], w))
-            count[pa][ports[0]][0] += 1
-            count[pt][ports[1]][1] += 1
     out = []
     for k, pl in enumerate(P["plates"]):
         x0, x1, z = pl["x"], pl["x"] + pl["w"], pl["z"]
@@ -1000,18 +901,16 @@ def plate_ports(F, P):
             pts = use[k][side]
             px = sum(x * w for x, w in pts) / sum(w for _, w in pts) if pts else cx
             px = min(max(px, x0 + 0.3), x1 - 0.3)
-            ports[side] = {"x": round(px, 3), "z": round(pz, 3), "out": count[k][side][0], "in": count[k][side][1]}
+            ports[side] = {"x": round(px, 3), "z": round(pz, 3)}
         for side, px in (("left", x0), ("right", x1)):
             if use[k][side]:
-                ports[side] = {"x": round(px, 3), "z": round(z, 3), "out": count[k][side][0], "in": count[k][side][1]}
+                ports[side] = {"x": round(px, 3), "z": round(z, 3)}
         unit = pl["unit"]
         stem = pl["package"] if pl["package"] == F["model"]["package_name"] else pl["package"].split(".")[-1]
         out.append({
-            "unit": unit, "package": pl["package"],
-            "name": stem + (unit[len(pl["package"]):] if unit != pl["package"] else ""),
+            "unit": unit,
+            "name": stem,
             "row": pl["row"], "x": pl["x"], "z": pl["z"], "w": pl["w"], "modules": pl["modules"],
-            "centre": {"x": round(cx, 3), "z": round(z + (PLATE_FRONT - PLATE_BACK) / 2, 3)},
-            "front": round(z + PLATE_FRONT, 3), "back": round(z - PLATE_BACK, 3),
             "ports": ports,
         })
     return out
@@ -1020,34 +919,15 @@ def plate_ports(F, P):
 # ============================================================== assemble
 
 
-def package_tree(model, packages, units):
-    """Parent of every package, and the slices of a split package as its children."""
-    def walk(item, parent, out):
-        if item["type"] == "package" and item.get("path"):
-            out[item["path"]] = parent
-            parent = item["path"]
-        for child in item["children"]:
-            if child["type"] == "package":
-                walk(child, parent, out)
-        return out
-
-    parents = walk(model["tree"], None, {})
-    tree = [{"package": p, "parent": parents.get(p), "slice": False, "has_modules": p in packages} for p in sorted(parents)]
-    for u in sorted(units):
-        if SLICE in u:
-            tree.append({"package": u, "parent": u.split(SLICE)[0], "slice": True, "has_modules": True})
-    return tree
-
-
 def assemble(F, P):
     nodes, classes, class_of, wrappers = F["nodes"], F["classes"], F["class_of"], F["wrappers"]
     fl, panes = F["floors"], F["panes"]
     ground = fl["ground"]
-    model, snapshot = F["model"], F["snapshot"]
+    model = F["model"]
     layout = model["layout"]
     package_name = model["package_name"]
-    level, unit_of = F["level"], P["unit_of"]
-    row_of = {m: i for i, r in enumerate(P["rows"]) for m in r}
+    unit_of = P["unit_of"]
+    row_of = P["row_of"]
     pane_set = set(F["pane_modules"])
 
     out_cards, out_classes, out_panes = [], [], []
@@ -1068,12 +948,11 @@ def assemble(F, P):
             "district": p,
             "plate": unit_of[m],
             "row": row_of[m],
-            "level": level[m],
             "x": round(x, 3), "z": round(dz, 3), "w": round(pane["width"], 3),
-            "top": 0.0, "bottom": round(-ground, 3),
+            "top": 0.0,
             "box": {
                 "x": round(x0, 3), "w": b["w"], "h": b["box_h"], "d": MOD_D, "open_h": b["open_h"], "line": b["line"],
-                "card_w": b["card_w"], "margin": b["margin"], "lanes": b["lanes"], "dead_top": None if b["dead_top"] is None else round(-b["dead_top"], 3),
+                "margin": b["margin"], "lanes": b["lanes"], "dead_top": None if b["dead_top"] is None else round(-b["dead_top"], 3),
                 "rows": b["rows"], "more": b["more"], "tail": b["tail"], "ghosts": b["ghosts"],
             },
             "functions": len(n_ids),
@@ -1090,21 +969,13 @@ def assemble(F, P):
     out_plates = plate_ports(F, P)
     plate_index = {pl["unit"]: k for k, pl in enumerate(out_plates)}
 
-    # packages in tree order: the scope unit of the sidebar and the breadcrumbs
+    # packages in tree order for the sidebar and breadcrumbs
     out_districts = []
     for p in F["packages"]:
-        mine = [pl for pl in out_plates if pl["package"] == p]
-        span_w = sum(pl["w"] for pl in mine)
         out_districts.append({
             "package": p,
             "name": p if p == package_name else p.split(".")[-1],
             "modules": list(F["modules_by_package"][p]),
-            "plates": [pl["unit"] for pl in mine],
-            "rows": sorted({pl["row"] for pl in mine}),
-            "centre": {
-                "x": round(sum((pl["x"] + pl["w"] / 2) * pl["w"] for pl in mine) / span_w, 3),
-                "z": round(sum(pl["centre"]["z"] * pl["w"] for pl in mine) / span_w, 3),
-            },
         })
 
     ids = sorted(nodes)
@@ -1115,16 +986,11 @@ def assemble(F, P):
         rec = {
             "id": nid,
             "name": n["name"],
-            "qual": n["qualified_name"],
             "module": n["module"],
-            "kind": n["kind"],
             "line": n["line_start"],
-            "loc": n["loc"],
             "doc": n["docstring_summary"],
-            "rank": F["rank"].get(nid),
-            "root": n["is_root"],
-            "exported": bool(n.get("exported", False)),  # snapshot v8: in __all__ or re-exported by a package __init__
-            "exported_from": list(n.get("exported_from") or []),
+            "exported": n["exported"],
+            "exported_from": n["exported_from"],
             "dead": n["dead"],
             "lb": n["load_bearing"],
             "hub": n["is_hub"],
@@ -1132,9 +998,6 @@ def assemble(F, P):
             "wrapper": nid in wrappers,
             "clone": F["clone_of"].get(nid),
             "private": n["is_private"],
-            "fan_in": n["fan_in"],
-            "fan_out": n["fan_out"],
-            "unresolved": n["unresolved_out"],
             "cls": class_of.get(nid),
             "params": [q["name"] for q in sym.get("parameters", [])],
             "slot": slot_of.get(nid),
@@ -1151,7 +1014,6 @@ def assemble(F, P):
         out_classes.append({
             **{k: cl[k] for k in ("id", "name", "module", "line", "doc", "ctor", "public", "private", "dead_private", "fields", "access", "data_only")},
             "exported": cl["exported"], "exported_from": cl["exported_from"],
-            "rank": F["class_rank"][cid],
             "slot": slot_of.get(cid),
             "x": x, "y": y, "z": z, "w": w, "h": round(h, 3), "d": BOX_D,
             "expanded": {
@@ -1177,19 +1039,7 @@ def assemble(F, P):
     def box_of(item):
         return item if item in classes else class_of.get(item)
 
-    def foot(item):
-        if item in card_world:
-            x, _, z, w, _ = card_world[item]
-            return x + w / 2, z
-        x, _, z, w, _ = box_world[class_of.get(item, item)]
-        return x + w / 2, z
-
-    def against(s, t):
-        """The flow is reading order: back to front between rows, left to right in a row."""
-        (xs, zs), (xt, zt) = foot(s), foot(t)
-        return zt < zs - 1e-6 or (abs(zt - zs) <= 1e-6 and xt < xs - 1e-6)
-
-    # ---- edges: Python's kinds (v7 model.edges[*].kind) ----------------------
+    # ---- edges ---------------------------------------------------------------
     # kind: same_module | cross_module | into_class | intra_class | constructs.
     out_edges = []
     for e in model["edges"]:
@@ -1200,14 +1050,12 @@ def assemble(F, P):
         if ms not in pane_set or mt not in pane_set:
             continue
         rec = {
-            "s": s, "t": t, "kind": e["kind"], "back": e["back"],
+            "s": s, "t": t, "kind": e["kind"],
             "span": span(ms, mt), "ms": ms, "mt": mt, "ss": slot_of.get(s), "ts": slot_of.get(t),
             "dead": nodes[s]["dead"] or (t in nodes and nodes[t]["dead"]),
         }
         if e["kind"] in ("into_class", "constructs", "intra_class"):
             rec["cls"] = box_of(t)
-        if ms != mt:
-            rec["against"] = against(s, t)
         out_edges.append(rec)
     out_edges.sort(key=lambda r: (r["ms"], r["mt"], r["s"], r["t"]))
 
@@ -1225,7 +1073,6 @@ def assemble(F, P):
         out_bundles.append({
             "s": key[0], "t": key[1], "count": b["count"], "span": span(*key),
             "us": unit_of[key[0]], "ut": unit_of[key[1]],
-            "against": any(out_edges[k]["against"] for k in members[key]),
             "members": members[key],
         })
     assert sum(len(v) for v in members.values()) == sum(b["count"] for b in out_bundles)
@@ -1260,18 +1107,15 @@ def assemble(F, P):
         {
             "s": a, "t": b, "span": "row" if out_plates[plate_index[a]]["row"] == out_plates[plate_index[b]]["row"] else "cross_row",
             "count": v["count"], "bundles": v["bundles"],
-            "against": any(out_bundles[k]["against"] for k in v["bundles"]),
         }
         for (a, b), v in sorted(plate_pairs.items(), key=lambda kv: (plate_index[kv[0][0]], plate_index[kv[0][1]]))
     ]
 
-    # ---- module imports (v7 layout.imports, re-exports already followed) ---
+    # ---- module imports ------------------------------------------------------
     out_imports = [
-        {"s": a, "t": b, "cycle": (a, b) in F["cycle_pairs"], "call": (a, b) in F["calls"], "span": span(a, b)}
+        {"s": a, "t": b, "cycle": (a, b) in F["cycle_pairs"], "span": span(a, b)}
         for a, b in F["imports"]
     ]
-    undrawn_imports = sum(1 for a, b in layout["imports"] if a not in pane_set or b not in pane_set)
-
     # ---- reach: downstream sets with BFS depth, for emphasis lookups -------
     out_adj, in_adj = defaultdict(list), defaultdict(list)
     for e in out_edges:
@@ -1291,44 +1135,20 @@ def assemble(F, P):
         reach[nid] = [[index[v], dd] for v, dd in sorted(depth.items(), key=lambda kv: (kv[1], kv[0]))]
     callers = {nid: sorted(set(in_adj[nid])) for nid in ids}
 
-    pipelines = []
-    for p in snapshot["architecture"]["pipelines"]:
-        if nodes.get(p["root"], {}).get("module") in F["test_modules"]:
-            continue
-        pipelines.append({"root": p["root"], "title": p["title"], "listed": len(p["function_ids"]), "reach": len(reach[p["root"]])})
-
-    def count(items, key, values):
-        return {k: sum(1 for r in items if r[key] == k) for k in values}
-
-    spans = ("pane", "plate", "row", "cross_row")
     view = {
         "package": package_name,
-        "snapshot_id": snapshot.get("snapshot_id"),
+        "snapshot_id": F["snapshot_id"],
         "placement": {
-            "name": "plates",
-            "rule": RULE,
-            "flow": "reading",
-            "rows": [{"z": round(i * ROW_GAP, 3), "modules": r} for i, r in enumerate(P["rows"])],
-            "plate_order": P["plate_order"],
-            "corridor": {
-                "row_gap": ROW_GAP, "plate_back": PLATE_BACK, "plate_front": PLATE_FRONT,
-                "between_rows": round(ROW_GAP - PLATE_BACK - PLATE_FRONT, 3),
-                "street": STREET, "pane_gap": PANE_GAP,
-            },
-            "dropped": F["dropped"],
+            "rows": [{"z": P["z"][r[0]], "modules": r} for i, r in enumerate(P["rows"])],
         },
-        "floors": {"top": 0.0, "ground": round(-ground, 3)},
+        "floors": {"ground": round(-ground, 3)},
         "dims": {
-            "card_w": CARD_W, "card_h": CARD_H, "box_w": BOX_W, "box_head": BOX_HEAD,
-            "box_row": BOX_ROW, "box_field": BOX_FIELD, "box_tail": BOX_TAIL, "box_d": BOX_D,
-            "floor_gap": FLOOR_GAP, "pane_header": PANE_HEADER, "expand_lift": EXPAND_LIFT,
-            "mod_header": BOX_HEADER, "mod_line_min": PITCH_MIN, "row_pad": ROW_PAD, "wrap_pad": WRAP_PAD, "ghost_pad": GHOST_PAD, "mod_tail": MOD_TAIL,
-            "mod_d": MOD_D, "gutter": GUTTER, "arc_margin": ARC_MARGIN, "row_cap": ROW_CAP, "type_floor": TYPE_FLOOR,
-            "row_gap": ROW_GAP, "plate_back": PLATE_BACK, "plate_front": PLATE_FRONT,
+            "box_head": BOX_HEAD, "box_row": BOX_ROW, "box_field": BOX_FIELD, "box_tail": BOX_TAIL,
+            "gutter": GUTTER, "mod_header": BOX_HEADER, "row_pad": ROW_PAD,
+            "plate_back": PLATE_BACK, "plate_front": PLATE_FRONT,
         },
         "districts": out_districts,
         "plates": out_plates,
-        "tree": package_tree(model, F["packages"], set(unit_of.values())),
         "panes": out_panes,
         "nodes": out_cards,
         "classes": out_classes,
@@ -1340,29 +1160,5 @@ def assemble(F, P):
         "clones": [g["members"] for g in model["clones"]],
         "reach": reach,
         "callers": callers,
-        "pipelines": pipelines,
-        "summary": {
-            "functions": len(out_cards),
-            "edges": len(out_edges),
-            "kinds": {k: sum(1 for e in out_edges if e["kind"] == k) for k in sorted({e["kind"] for e in out_edges})},
-            "spans": count(out_edges, "span", spans),
-            "against": sum(1 for e in out_edges if e.get("against")),
-            "bundles": len(out_bundles),
-            "links": len(out_links),
-            "surface_rows": sum(len(pn["box"]["rows"]) for pn in out_panes),
-            "sealed_boxes": sum(1 for pn in out_panes if not pn["box"]["rows"] and not pn["box"]["more"]),
-            "bundle_spans": count(out_bundles, "span", spans[1:]),
-            "plate_bundles": len(out_plate_bundles),
-            "plate_bundle_spans": count(out_plate_bundles, "span", spans[2:]),
-            "imports_drawn": len(out_imports),
-            "import_spans": count(out_imports, "span", spans[1:]),
-            "imports_without_column": undrawn_imports,
-            "dead": sum(1 for n in out_cards if n["dead"]),
-            "clone_groups": len(model["clones"]),
-            "import_cycles": len(layout["import_cycles"]),
-            "classes": len(out_classes),
-            "plates": len(out_plates),
-            "rows": len(P["rows"]),
-        },
     }
     return view

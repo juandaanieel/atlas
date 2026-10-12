@@ -5,6 +5,7 @@ import builtins
 from collections import defaultdict
 from dataclasses import dataclass
 
+from atlas.analyzer.ast_names import dotted_name
 from atlas.analyzer.imports import build_import_aliases, resolve_from_base
 from atlas.analyzer.models import CallInfo, ImportInfo, SymbolInfo
 from atlas.analyzer.parser import ParsedFile
@@ -37,29 +38,21 @@ class CallVisitor(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        return
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        return
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+    visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = visit_FunctionDef
 
 
 class ScopeVisitor(ast.NodeVisitor):
-    """Collect imports and local bindings without entering nested scopes."""
+    """Collect imports without entering nested scopes."""
 
     def __init__(self, file_id: str, module: str) -> None:
         self.file_id = file_id
         self.module = module
         self.imports: list[ImportInfo] = []
-        self.bound_names: set[str] = set()
 
-    def collect(self, node: ast.AST) -> tuple[list[ImportInfo], set[str]]:
+    def collect(self, node: ast.AST) -> list[ImportInfo]:
         for child in getattr(node, "body", []):
             self.visit(child)
-        return self.imports, self.bound_names
+        return self.imports
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -95,20 +88,13 @@ class ScopeVisitor(ast.NodeVisitor):
             )
 
     def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, (ast.Store, ast.Del)):
-            self.bound_names.add(node.id)
+        # Names cannot contain imports; skip their context nodes.
+        return
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.bound_names.add(node.name)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.bound_names.add(node.name)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.bound_names.add(node.name)
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
         return
+
+    visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = visit_FunctionDef
 
 
 class AssignmentVisitor(ast.NodeVisitor):
@@ -134,38 +120,16 @@ class AssignmentVisitor(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         return
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        return
+    visit_ImportFrom = visit_Import
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
         if node.col_offset:
             self.names.add(node.name)
-        return
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        if node.col_offset:
-            self.names.add(node.name)
-        return
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        if node.col_offset:
-            self.names.add(node.name)
-        return
+    visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         return
-
-    def visit_ListComp(self, node: ast.ListComp) -> None:
-        self.generic_visit(node)
-
-    def visit_SetComp(self, node: ast.SetComp) -> None:
-        self.generic_visit(node)
-
-    def visit_DictComp(self, node: ast.DictComp) -> None:
-        self.generic_visit(node)
-
-    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        self.generic_visit(node)
 
     def visit_MatchAs(self, node: ast.AST) -> None:
         name = getattr(node, "name", None)
@@ -187,19 +151,6 @@ class AssignmentVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def dotted_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        parent = dotted_name(node.value)
-        return f"{parent}.{node.attr}" if parent else node.attr
-    if isinstance(node, ast.Call):
-        return dotted_name(node.func)
-    if isinstance(node, ast.Subscript):
-        return dotted_name(node.value)
-    return None
-
-
 def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> list[CallInfo]:
     symbol_by_id = {symbol.id: symbol for symbol in symbols}
     symbol_ids = set(symbol_by_id)
@@ -211,8 +162,8 @@ def build_calls(parsed_files: list[ParsedFile], symbols: list[SymbolInfo]) -> li
 
     calls: list[CallInfo] = []
     for parsed in parsed_files:
-        module_scope_imports = _scope_imports(parsed, parsed.tree)
-        direct_module_imports = _module_imports(parsed)
+        module_scope_imports = ScopeVisitor(parsed.file.id, parsed.file.module).collect(parsed.tree)
+        direct_module_imports = _direct_imports(parsed, parsed.tree)
         direct_module_import_names = {
             _visible_import_name(info) for info in direct_module_imports
         }
@@ -304,10 +255,13 @@ def _exported_symbols(
     pending: list[tuple[str, str]] = []
 
     for parsed in parsed_files:
-        direct_imports = _module_imports(parsed)
+        direct_imports = _direct_imports(parsed, parsed.tree)
         direct_names = {_visible_import_name(info) for info in direct_imports}
         ambiguous_names = (
-            _conditional_import_names(_scope_imports(parsed, parsed.tree), direct_imports)
+            _conditional_import_names(
+                ScopeVisitor(parsed.file.id, parsed.file.module).collect(parsed.tree),
+                direct_imports,
+            )
             | AssignmentVisitor().collect(parsed.tree)
             | (_direct_definition_names(parsed.tree) & direct_names)
         )
@@ -378,7 +332,9 @@ def _package_public_names(parsed: ParsedFile) -> set[str]:
     if declared is not None:
         return declared
     imported = {
-        _visible_import_name(info) for info in _module_imports(parsed) if info.kind == "from"
+        _visible_import_name(info)
+        for info in _direct_imports(parsed, parsed.tree)
+        if info.kind == "from"
     }
     return {
         name
@@ -440,10 +396,6 @@ def _reexport_base(parsed: ParsedFile, info: ImportInfo) -> str:
     return ".".join(base_parts)
 
 
-def _module_imports(parsed: ParsedFile) -> list[ImportInfo]:
-    return _direct_imports(parsed, parsed.tree)
-
-
 def _direct_imports(parsed: ParsedFile, node: ast.AST) -> list[ImportInfo]:
     """Return imports that execute directly in this scope, not in a branch."""
     imports: list[ImportInfo] = []
@@ -452,12 +404,6 @@ def _direct_imports(parsed: ParsedFile, node: ast.AST) -> list[ImportInfo]:
             visitor = ScopeVisitor(parsed.file.id, parsed.file.module)
             visitor.visit(child)
             imports.extend(visitor.imports)
-    return imports
-
-
-def _scope_imports(parsed: ParsedFile, node: ast.AST) -> list[ImportInfo]:
-    visitor = ScopeVisitor(parsed.file.id, parsed.file.module)
-    imports, _ = visitor.collect(node)
     return imports
 
 
@@ -482,7 +428,7 @@ def _direct_definition_names(node: ast.AST) -> set[str]:
 
 def _callable_scope(parsed: ParsedFile, node: ast.AST) -> tuple[list[ImportInfo], set[str]]:
     visitor = ScopeVisitor(parsed.file.id, parsed.file.module)
-    imports, _ = visitor.collect(node)
+    imports = visitor.collect(node)
     shadowed_names = AssignmentVisitor().collect(node)
     arguments = getattr(node, "args", None)
     if arguments is not None:

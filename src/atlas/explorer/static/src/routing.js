@@ -1,4 +1,4 @@
-// Connection geometry for Strata, strata-lines (docs/plans/strata-lines.md). Pure
+// Connection geometry for Strata. Pure
 // functions, no three.js. Python (prepare.py, build_routes) decides every path: the
 // module-pair tracks and sky arcs, the plate ribbons, each call's stub, its per-call
 // curve, its margin lane inside an unfolded module, and the loops inside an opened

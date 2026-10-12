@@ -29,7 +29,7 @@ def dashboard_server(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
-        application.close()
+        application.jobs.close()
         thread.join(timeout=2)
 
 

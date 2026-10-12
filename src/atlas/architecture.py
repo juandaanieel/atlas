@@ -45,16 +45,15 @@ def build_architecture(
 
     function_by_id = {function["id"]: function for function in functions}
     pipelines = _pipelines(model, function_by_id)
-    functionality_records = functionalities
-    if functionality_records is None:
-        functionality_records = load_functionalities(root, set(function_by_id), functionality_dir)
-    _apply_functionalities(function_by_id, functionality_records)
+    if functionalities is None:
+        functionalities = load_functionalities(root, set(function_by_id), functionality_dir)
+    _apply_functionalities(function_by_id, functionalities)
     return {
         "snapshot_id": snapshot_id,
         "functions": functions,
         "pipelines": pipelines,
-        "functionalities": functionality_records,
-        "functionality_issues": functionality_issues(functionality_records),
+        "functionalities": functionalities,
+        "functionality_issues": functionality_issues(functionalities),
     }
 
 

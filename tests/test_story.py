@@ -142,6 +142,13 @@ def test_focus_file_drives_the_pipeline_chapters_in_author_order(tmp_path):
     assert "4 focus items from atlas-focus.json" in story["summary"]
 
 
+def test_null_focus_file_is_rejected_instead_of_using_default_guide(tmp_path):
+    snapshot = analyze_path(FIXTURES / "export_package")
+    (tmp_path / FOCUS_FILE).write_text("null", encoding="utf-8")
+    with pytest.raises(ValueError, match="must contain an object"):
+        story_for_snapshot(tmp_path, snapshot)
+
+
 def test_focus_validation_names_unknown_and_repeated_ids():
     snapshot = analyze_path(FIXTURES / "export_package")
 

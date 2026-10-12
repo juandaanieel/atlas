@@ -8,18 +8,20 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { makeRouting, slotsOf, samplePath } from './routing.js';
 import { THEMES, THEME_KEY, initialTheme } from './theme.js';
 import { codeHtml, escapeHtml as esc } from './source.js';
+import { fitCamera } from './camera.js';
+import { documentationHtml } from './documentation.js';
 
 function start() {
 let rafPending = false;
 // ---------------------------------------------------------------- palette
-// Two themes (theme.js, from GitHub Primer's high-contrast themes; docs/plans/strata-theme.md).
+// Two themes from GitHub Primer's high-contrast palette.
 // C (materials), TIER (neutral line tiers), T (text) and K (label canvas) hold the active
 // theme's tokens; setTheme() swaps them and repaints every material in place.
 // Four reserved hues, one meaning each: load-bearing blue, clone purple, dead yellow, import
 // cycle red. Attention (hover, selection, trace) is maximum contrast against the canvas.
 let THEME = initialTheme();
 const C = {}, TIER = {}, T = {}, K = {};
-// Visual hierarchy (docs/plans/strata-hierarchy.md). Each view reads in three tiers:
+// Visual hierarchy. Each view reads in three tiers:
 // tier 1 the unit the view is about and the defect marks, tier 2 the connections that
 // answer the view's question, tier 3 context. Neutral line tokens: strong (tier 1), link
 // (tier 2), edge and rule (tier 3); text, muted, dim for labels; emphasis above every tier.
@@ -27,10 +29,10 @@ const C = {}, TIER = {}, T = {}, K = {};
 // S captions and pointers. Nothing is drawn below S (9 px at 1280 x 800).
 const TYPE = { L: 12, M: 10, S: 9 };
 // How a module box looks at each tier: outline [colour, width], header fill, row rules,
-// hatch strength, glass column strength, foot line. BOX_TIER and STYLE are rebuilt from
+// internal-band strength, glass column strength, foot line. BOX_TIER and STYLE are rebuilt from
 // the tokens whenever the theme changes.
 let BOX_TIER, STYLE;
-// Lines and names per view (strata-hierarchy.md "Tiers per view", on the surface track's marks):
+// Lines and names per view, on the surface track's marks:
 //   overview  plates and package names tier 1, package ribbons tier 2, boxes tier 3 (silhouettes)
 //   plan      plates and package names tier 1, imports tier 2, boxes tier 3
 //   package   boxes, their public rows and module names tier 1, module-pair tracks tier 2
@@ -40,9 +42,9 @@ function loadTokens(name) {
   THEME = name;
   Object.assign(C, t.C); Object.assign(TIER, t.TIER); Object.assign(T, t.T); Object.assign(K, t.K);
   BOX_TIER = {
-    1: { edge: [TIER.strong, 1.4], head: t.HEAD[1], rule: TIER.edge, hatch: 0.75, column: 0.4, foot: TIER.edge },
-    2: { edge: [TIER.link, 1.2], head: t.HEAD[2], rule: TIER.rule, hatch: 0.55, column: 0.3, foot: TIER.rule },
-    3: { edge: [TIER.edge, 1], head: t.HEAD[3], rule: TIER.rule, hatch: 0.35, column: 0.18, foot: TIER.rule },
+    1: { edge: [TIER.strong, 1.4], head: t.HEAD[1], rule: TIER.edge, internals: 0.75, column: 0.4, foot: TIER.edge },
+    2: { edge: [TIER.link, 1.2], head: t.HEAD[2], rule: TIER.rule, internals: 0.55, column: 0.3, foot: TIER.rule },
+    3: { edge: [TIER.edge, 1], head: t.HEAD[3], rule: TIER.rule, internals: 0.35, column: 0.18, foot: TIER.rule },
   };
   STYLE = {
     overview: { plate: [TIER.link, 1.2], pkg: T.text, box: 3, link: TIER.link, call: TIER.link, ribbon: TIER.link, imp: TIER.edge, card: [TIER.link, 1], block: [TIER.link, 1.2] },
@@ -60,12 +62,9 @@ const mixHex = (a, b, t) => new THREE.Color(a).lerp(new THREE.Color(b), t).getHe
 const cssHex = (n) => '#' + n.toString(16).padStart(6, '0');
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const FONT = '"JetBrains Mono","SF Mono","SFMono-Regular",Menlo,Consolas,monospace';
-// free picture area: the left panel (guide or scope tree, 300 px) and the rail at the
-// bottom. Both modes share it, so leaving the guide never shifts the picture.
-const PAD_L = 324, PAD_T = 52, PAD_R = 0, PAD_B = 64;
-// the inspector on the right: resizable, its width remembered; it covers the picture's right
-// side and never moves the camera (a later fit, a scope change or a view, frames around it)
-const INSP_KEY = 'strata.inspector.width', INSP_MIN = 300, INSP_MAX = 820, INSP_DEFAULT = 420;
+// Reserve only the toolbar and rail; navigation and source share one right-hand panel.
+const PAD_L = 0, PAD_T = 40, PAD_R = 0, PAD_B = 36;
+const INSP_KEY = 'atlas.panel.width', INSP_MIN = 320, INSP_MAX = 960, INSP_DEFAULT = 480;
 let inspW = (() => { const v = +localStorage.getItem(INSP_KEY); return v ? Math.max(INSP_MIN, Math.min(INSP_MAX, v)) : INSP_DEFAULT; })();
 const frameEl = document.querySelector('#frame');
 const viewW = () => frameEl.clientWidth, viewH = () => frameEl.clientHeight;
@@ -73,7 +72,7 @@ const DPR = Math.min(devicePixelRatio, 2);
 
 const $ = (s) => document.querySelector(s);
 // the picture width the inspector covers (its width plus the right margin and a gap)
-const inspPx = () => ($('#inspector').classList.contains('hidden') ? 0 : inspW + 18);
+const inspPx = () => ($('#panel').classList.contains('hidden') || W < 720 ? 0 : $('#panel').getBoundingClientRect().width + 24);
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const lerp = (a, b, t) => a + (b - a) * t;
 const easeOut = (t) => 1 - Math.pow(1 - t, 4.5);
@@ -83,11 +82,11 @@ const col = (hex) => new THREE.Color(hex);
 
 // ---------------------------------------------------------------- data
 // Embedded source excerpts and AST call positions for the inspector.
-const { view, source: SOURCE } = JSON.parse($('#atlasView').textContent);
+const { view, source: SOURCE, optimization_prompt: optimizationPrompt } = JSON.parse($('#atlasView').textContent);
 $('#pkg').textContent = view.package;
 if (!view.panes.length) {
   $('#status').textContent = 'No non-test functions or classes to display.';
-  for (const id of ['guide', 'legend', 'rail', 'modes', 'views']) $('#' + id).classList.add('hidden');
+  for (const id of ['panel', 'cameraTools', 'rail', 'modes', 'views']) $('#' + id).classList.add('hidden');
   return;
 }
 const SRC = SOURCE.symbols;
@@ -102,16 +101,13 @@ const F = view.floors;
 $('#pkg').textContent = view.package;
 const R = makeRouting(view);
 const linkOfEdge = new Map();
-view.links.forEach((l, li) => l.members.forEach((ei, j) => linkOfEdge.set(ei, li)));
-const memberIndex = new Map();
-view.links.forEach((l) => l.members.forEach((ei, j) => memberIndex.set(ei, { j, m: l.members.length })));
+view.links.forEach((l, li) => l.members.forEach((ei) => linkOfEdge.set(ei, li)));
 const SLOT = new Map();
 for (const p of view.panes) for (const s of slotsOf(p.box)) SLOT.set(`${p.module}|${s.slot}`, s);
-// the reading path: Python's guide block (story v2: chapters, pipelines, signals), one resolved state per step
+// the reading path: the guide block (chapters, pipelines, signals), one resolved state per step
 const GUIDE = view.guide;
 const STEPS = GUIDE.steps;
 const STEP_INDEX = new Map(STEPS.map((st, i) => [st.id, i]));
-const visited = new Set();
 
 // guide: index of the step on screen, or null while the reader explores; resume: the
 // step "Resume guide" returns to; pulse: the selection is an explicit pipeline (pulses run)
@@ -120,6 +116,8 @@ const visited = new Set();
 // hoverCall: the call lines the reader hovers in the source ({ edges, targets, line });
 // proj: a scoped Elevation's camera (ortho by default; o toggles)
 const state = { scope: null, selected: null, hover: null, hoverBox: null, hoverLine: null, open: new Set(), expanded: new Set(), view: 'axo', mouse: [0, 0], guide: null, resume: 0, pulse: false, proj: 'ortho', inspect: null, inspectBack: [], hoverCall: null };
+let panelMode = 'guide', browsePackage = null, browseModule = null, browseScroll = 0;
+let panelExpanded = false, orbit = true, ready = false;
 const guideStep = () => (state.guide === null ? null : STEPS[state.guide]);
 // the view the reader is in: decides every element's tier
 function viewCtx() {
@@ -145,13 +143,16 @@ const ortho = new THREE.OrthographicCamera(-640, 640, 400, -400, 0.5, 3000);
 const ORTHO_D = 120;
 let camera = persp;
 const controls = new OrbitControls(camera, glCanvas);
-controls.enableDamping = true;
-controls.dampingFactor = 0.12;
+controls.enableDamping = false;
+controls.enableRotate = true;
+controls.zoomSpeed = 0.65;
 controls.screenSpacePanning = true;
 controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-controls.maxPolarAngle = Math.PI * 0.62;
+controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+controls.minPolarAngle = 0.06;
+controls.maxPolarAngle = Math.PI / 2 - 0.02;
 
-// The section cut (strata-lines): in a scoped view every row in front of the scope's front
+// The section cut: in a scoped view every row in front of the scope's front
 // row is cut away by one clipping plane, whatever the camera does.
 const cutPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
 const backPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -168,7 +169,7 @@ function mkLine(pts, o = {}) {
   geo.setColors(new Float32Array(pts.length).fill(1));
   const mat = new LineMaterial({
     color: 0xffffff, linewidth: o.width ?? 1, vertexColors: true, transparent: true,
-    opacity: o.opacity ?? 1, dashed: !!o.dashed, dashSize: o.dash ?? 0.12, gapSize: o.gap ?? 0.1,
+    opacity: o.opacity ?? 1, dashed: !!o.dashed, dashSize: Math.max(2, (o.dash ?? 0.12) * 40), gapSize: Math.max(2, (o.gap ?? 0.1) * 40),
     depthWrite: false, fog: true,
   });
   mat.resolution.set(W, H);
@@ -197,7 +198,7 @@ function paintLine(line, a, b, n) {
 function mkSegments(pairs, o = {}) {
   const geo = new LineSegmentsGeometry();
   geo.setPositions(pairs);
-  const mat = new LineMaterial({ color: o.color ?? 0xffffff, linewidth: o.width ?? 1, transparent: true, opacity: o.opacity ?? 1, dashed: !!o.dashed, dashSize: o.dash ?? 0.1, gapSize: o.gap ?? 0.08, depthWrite: false, fog: true });
+  const mat = new LineMaterial({ color: o.color ?? 0xffffff, linewidth: o.width ?? 1, transparent: true, opacity: o.opacity ?? 1, dashed: !!o.dashed, dashSize: Math.max(2, (o.dash ?? 0.1) * 40), gapSize: Math.max(2, (o.gap ?? 0.08) * 40), depthWrite: false, fog: true });
   mat.resolution.set(W, H);
   lineMats.push(mat);
   const seg = new LineSegments2(geo, mat);
@@ -226,50 +227,19 @@ const TOKMATS = [], TOKLINES = [];
 function tmat(key, opacity = 1, extra = {}) { const m = basic(C[key], opacity, extra); TOKMATS.push([m, key]); return m; }
 function tpaint(line, key, n) { paintLine(line, C[key], null, n); TOKLINES.push([line, key, n]); return line; }
 const planeGeo = new THREE.PlaneGeometry(1, 1);
-function vplane(x, y, w, h, z, mat, order = 2) {
+// Decals test against solid geometry, but never occlude each other. A depth bias
+// keeps them off the carrier face at distant zooms; renderOrder composes their layers.
+function vplane(x, y, w, h, z, mat, order = 2.1) {
+  mat.depthWrite = false;
+  mat.polygonOffset = true;
+  mat.polygonOffsetFactor = -1;
+  mat.polygonOffsetUnits = -4;
   const m = new THREE.Mesh(planeGeo, mat);
   m.scale.set(w, h, 1);
   m.position.set(x + w / 2, y - h / 2, z);
   m.renderOrder = order;
   return m;
 }
-// Two hatches: the private tail's (neutral, rising to the right) and the dead row's (the dead
-// hue, falling to the right, coarser and heavier: caution tape). Both redraw on a theme change.
-const HATCHES = [];
-function drawHatch(c, kind) {
-  const g = c.getContext('2d');
-  g.clearRect(0, 0, 32, 32);
-  g.strokeStyle = kind === 'dead' ? cssHex(C.dead) : K.hatch;
-  g.lineWidth = kind === 'dead' ? 3 : 2;
-  for (let k = -32; k < 64; k += 8) {
-    g.beginPath();
-    if (kind === 'dead') { g.moveTo(k, 0); g.lineTo(k + 32, 32); } else { g.moveTo(k, 32); g.lineTo(k + 32, 0); }
-    g.stroke();
-  }
-}
-function hatchTexture(rx = 4, ry = 1, kind = 'tail') {
-  const c = document.createElement('canvas');
-  c.width = c.height = 32;
-  drawHatch(c, kind);
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.repeat.set(rx, ry);
-  HATCHES.push({ c, t, kind });
-  return t;
-}
-const HATCH = hatchTexture();
-// hatch at a fixed world pitch: one texture per (width, height, kind); the dead hatch's tile
-// is 0.5 units (stripes 0.125 apart), the tail's 0.3
-const hatchCache = new Map();
-function hatchFor(w, h, kind = 'tail') {
-  const k = `${w.toFixed(2)}|${h.toFixed(2)}|${kind}`;
-  const tile = kind === 'dead' ? 0.5 : 0.3;
-  if (!hatchCache.has(k)) hatchCache.set(k, hatchTexture(w / tile, h / tile, kind));
-  return hatchCache.get(k);
-}
-const hatchMat = (w, h, kind, opacity = 1) => basic(0xffffff, opacity, { map: hatchFor(w, h, kind), depthWrite: false });
-
 // ---------------------------------------------------------------- world bounds
 const minX = Math.min(...view.plates.map((d) => d.x)) - 4;
 const maxX = Math.max(...view.plates.map((d) => d.x + d.w)) + 4;
@@ -295,14 +265,33 @@ for (const d of view.plates) {
   const y = F.ground + 0.008;
   const outline = mkLine([d.x, y, z0, d.x + d.w, y, z0, d.x + d.w, y, z1, d.x, y, z1, d.x, y, z0], { width: 1, order: 1 });
   paintLine(outline, C.plateLine, null, 5);
-  scene.add(plate, outline);
-  plateObjs.set(d.unit, { d, plate, outline, a: 1, ta: 1 });
+  // One continuous package enclosure around its module boxes.
+  const height = Math.max(...d.modules.map((m) => PANE.get(m).box.h)) + 0.6;
+  const frame = mkSegments(Array.from(new THREE.EdgesGeometry(new THREE.BoxGeometry(d.w, height, z1 - z0)).attributes.position.array), { color: C.plateLine, width: 1, order: 1 });
+  frame.position.set(d.x + d.w / 2, 0.3 - height / 2, (z0 + z1) / 2);
+  // An open-front enclosure: opaque back, sides and floor hide packages behind it.
+  const walls = new THREE.Group();
+  const cy = 0.3 - height / 2, cz = (z0 + z1) / 2;
+  for (const [w, h, x, y, z, ry, rx, key] of [
+    [d.w, height, d.x + d.w / 2, cy, z0, 0, 0, 'plate'],
+    [z1 - z0, height, d.x, cy, cz, Math.PI / 2, 0, 'boxSide'],
+    [z1 - z0, height, d.x + d.w, cy, cz, Math.PI / 2, 0, 'boxSide'],
+    [d.w, z1 - z0, d.x + d.w / 2, 0.3 - height, cz, 0, -Math.PI / 2, 'plate'],
+  ]) {
+    const wall = new THREE.Mesh(planeGeo, tmat(key, 1, { transparent: false, side: THREE.DoubleSide }));
+    wall.scale.set(w, h, 1);
+    wall.position.set(x, y, z);
+    wall.rotation.set(rx, ry, 0);
+    walls.add(wall);
+  }
+  scene.add(plate, outline, frame, walls);
+  plateObjs.set(d.unit, { d, plate, outline, frame, walls, a: 1, ta: 1 });
 }
 
 // ---------------------------------------------------------------- module boxes
 // A box hangs from the entry surface (y = 0). Header, then one row per public name
 // (Python's rows), a "more" band of hairlines (one per hidden public name), the
-// hatched tail (internals), ghost rows (dead). Signals ride on the row, band or tail
+// muted bottom band (internals), ghost rows (dead). Signals ride on the row, band or tail
 // that holds them. Unfolding grows the body down to Python's open height; the rows
 // give way to the cards on the module's own depth floors.
 const unitBox = new THREE.BoxGeometry(1, 1, 1);
@@ -314,7 +303,7 @@ for (const p of view.panes) {
   g.position.set(b.x, 0, p.z);
   // the faces sit a few depth steps back (polygon offset): at the overview the camera is ~200
   // units away and one depth step is ~0.005 units, the depth of the row decals above the face
-  const face = (key) => tmat(key, 1, { polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 });
+  const face = (key) => tmat(key, 1, { transparent: false, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 });
   const mats = [face('boxSide'), face('boxSide'), face('boxTop'), face('boxSide'), face('modFront'), face('boxSide')];
   const body = new THREE.Mesh(unitBox, mats);
   body.userData = { type: 'module', id: p.module };
@@ -324,21 +313,27 @@ for (const p of view.panes) {
   bodyG.add(body, edges);
   g.add(bodyG);
   const zf = b.d + 0.004, w = b.w;
-  const head = vplane(0, 0, w, D.mod_header, zf, basic(C.modHead, 1, { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 2 }), 2); // styleBox colours it by tier
+  const head = vplane(0, 0, w, D.mod_header, zf, basic(C.modHead), 2.1); // styleBox colours it by tier
   g.add(head);
   const rowsG = [], sig = [], openG = [], lit = new Map();
-  // role: what the tier styling repaints (rule, classEdge, more, ghost) or fades (hatch)
-  const LAYER = { cloneFill: 2.01, deadFill: 2.01, hatch: 2.02, deadHatch: 2.02, ghost: 2.04, tick: 2.05 };
-  const put = (arr, obj, k = 1, role = null) => { obj.userData.k = k; obj.userData.role = role; if (LAYER[role]) obj.renderOrder = LAYER[role]; arr.push(obj); g.add(obj); return obj; };
+  // role: what the tier styling repaints (rule, classEdge, more, ghost) or fades (internals)
+  const LAYER = { cloneFill: 2.2, deadFill: 2.2, internals: 2.3, ghost: 2.4, tick: 2.5 };
+  const put = (arr, obj, k = 1, role = null) => {
+    obj.userData.k = k; obj.userData.role = role;
+    if (obj.isLine2 || obj.isLineSegments2) obj.renderOrder = 2.4;
+    else if (LAYER[role]) obj.renderOrder = LAYER[role];
+    arr.push(obj); g.add(obj);
+    return obj;
+  };
   // Signals ride on the row, band or tail that holds them: load-bearing a blue bar on the
   // left; a clone a purple fill (rows only: a tail stands for many functions) and a heavy
-  // dotted underline. Dead rows are built below. A box holding a dead function or a clone
+  // purple underline. Dead rows are built below. A box holding a dead function or a clone
   // also carries a solid tick per signal at the right of its header: the mark that reads at
   // the overview, where rows are a few pixels tall.
   const sigMarks = (s, y0, h, inset = 0.1, fill = false) => {
-    if (s.clone && fill) put(sig, vplane(0.03, y0 - 0.015, w - 0.06, h - 0.03, zf + 0.0012, tmat('cloneFill', 1, { depthWrite: false }), 2), C.cloneFillA, 'cloneFill');
-    if (s.lb) put(sig, vplane(0.04, y0 - 0.05, 0.12, Math.max(0.08, h - 0.1), zf + 0.002, tmat('lb'), 2));
-    if (s.clone) put(sig, tpaint(mkLine([inset + 0.06, y0 - h + 0.05, zf + 0.003, w - 0.1, y0 - h + 0.05, zf + 0.003], { width: 2.4, dashed: true, dash: 0.03, gap: 0.045, order: 2 }), 'clone', 2));
+    if (s.clone && fill) put(sig, vplane(0.03, y0 - 0.015, w - 0.06, h - 0.03, zf + 0.0012, tmat('cloneFill', 1, { depthWrite: false }), 2.1), C.cloneFillA, 'cloneFill');
+    if (s.lb) put(sig, vplane(0.04, y0 - 0.05, 0.12, Math.max(0.08, h - 0.1), zf + 0.002, tmat('lb'), 2.5));
+    if (s.clone) put(sig, tpaint(mkLine([inset + 0.06, y0 - h + 0.05, zf + 0.003, w - 0.1, y0 - h + 0.05, zf + 0.003], { width: 1.5, order: 2 }), 'clone', 2));
   };
   for (const r of b.rows) {
     const y0 = -r.y;
@@ -347,7 +342,7 @@ for (const p of view.panes) {
     put(rowsG, sep, 1, 'rule');
     if (r.kind === 'class') {
       // a class row is a class block in miniature: an inset face with its own edge
-      put(rowsG, vplane(0.12, y0 - 0.05, w - 0.22, r.h - 0.1, zf + 0.001, tmat('classRow'), 2));
+      put(rowsG, vplane(0.12, y0 - 0.05, w - 0.22, r.h - 0.1, zf + 0.001, tmat('classRow'), 2.1));
       const edge = mkLine(rectLoop(0.12, y0 - 0.05, w - 0.22, r.h - 0.1, zf + 0.0015), { width: 1, order: 2 });
       paintLine(edge, C.boxLine, null, 5);
       put(rowsG, edge, 1, 'classEdge');
@@ -363,27 +358,25 @@ for (const p of view.panes) {
   }
   if (b.tail) {
     const t = b.tail;
-    put(sig, vplane(0.03, -t.y - 0.03, w - 0.06, t.h - 0.06, zf + 0.001, hatchMat(w - 0.06, t.h - 0.06, 'tail', 0.85), 2), 1, 'hatch');
+    put(sig, vplane(0.03, -t.y - 0.03, w - 0.06, t.h - 0.06, zf + 0.001, tmat('boxHead'), 2.1), 1, 'internals');
     sigMarks(t, -t.y, t.h);
   }
   for (const gr of b.ghosts) {
-    // the dead never fold: a dead row under the tail, filled with the dead hue, hatched in
-    // it (caution tape) and outlined with its dashes
+    // the dead never fold: a dead row under the tail, filled with an amber fill and solid border
     const gx = 0.06, gy = -gr.y - 0.03, gw = w - 0.12, gh = gr.h - 0.06;
-    put(sig, vplane(gx, gy, gw, gh, zf + 0.0012, tmat('deadFill', 1, { depthWrite: false }), 2), C.deadFillA, 'deadFill');
-    put(sig, vplane(gx, gy, gw, gh, zf + 0.0016, hatchMat(gw, gh, 'dead'), 2), 0.9, 'deadHatch');
-    put(sig, tpaint(mkLine(rectLoop(gx, gy, gw, gh, zf + 0.002), { width: 1.6, dashed: true, dash: 0.08, gap: 0.06, order: 2 }), 'dead', 5), 1, 'ghost');
+    put(sig, vplane(gx, gy, gw, gh, zf + 0.0012, tmat('deadFill', 1, { depthWrite: false }), 2.1), C.deadFillA, 'deadFill');
+    put(sig, tpaint(mkLine(rectLoop(gx, gy, gw, gh, zf + 0.002), { width: 1.2, order: 2 }), 'dead', 5), 1, 'ghost');
     if (gr.id === null) {
       const n = Math.min(gr.lines, 4), pairs = [];
       for (let k = 0; k < n; k++) { const y = -gr.y - 0.04 - (k + 0.5) * ((gr.h - 0.08) / n); pairs.push(0.14, y, zf + 0.002, w - 0.14, y, zf + 0.002); }
-      put(sig, mkSegments(pairs, { color: C.dead, width: 1, dashed: true, dash: 0.05, gap: 0.05, order: 2 }), 1, 'deadLines');
+      put(sig, mkSegments(pairs, { color: C.dead, width: 1, order: 2 }), 1, 'deadLines');
     }
   }
   // the header ticks: dead rightmost, clone next to it
   const ticks = [];
   if (b.ghosts.length) ticks.push('dead');
   if (b.rows.some((r) => r.clone) || b.tail?.clone || b.more?.clone) ticks.push('clone');
-  ticks.forEach((key, i) => { const s = 0.3; put(sig, vplane(w - 0.1 - s - i * (s + 0.08), -0.16, s, s, zf + 0.003, tmat(key), 2), 1, 'tick'); });
+  ticks.forEach((key, i) => { const s = 0.3; put(sig, vplane(w - 0.1 - s - i * (s + 0.08), -0.16, s, s, zf + 0.003, tmat(key), 2.1), 1, 'tick'); });
   // the box face, with its slots, lit by a selection or a hover
   for (const s of slotsOf(b)) {
     const ln = tpaint(mkLine(rectLoop(0.03, -s.y - 0.015, w - 0.06, s.h - 0.03, zf + 0.004), { width: 1.4, order: 2.5 }), 'lit', 5);
@@ -407,7 +400,7 @@ for (const p of view.panes) {
   modObjs.set(p.module, o);
   styleBox(o, 3);
 }
-// A box takes its tier's outline, header, rules, hatch and glass; signal hues never change.
+// A box takes its tier's outline, header, rules, internal band and glass; signal hues never change.
 function styleBox(o, tier) {
   if (o.tier === tier) return;
   o.tier = tier;
@@ -440,12 +433,15 @@ function modAlpha(o) {
   const a = o.a, u = ease(o.u);
   // a silhouette (a box outside the scope): no fill, no depth, so it can hide nothing
   const f = o.sil ? 0 : 1;
-  o.mats.forEach((m) => { m.opacity = a * f; m.depthWrite = !o.sil; });
+  o.mats.forEach((m, i) => {
+    const key = ['boxSide', 'boxSide', 'boxTop', 'boxSide', 'modFront', 'boxSide'][i];
+    m.color.set(mixHex(C.bg, C[key], a));
+  });
   o.body.visible = !o.sil;
   o.edges.material.opacity = a;
   o.head.material.opacity = a * f;
   for (const x of o.rowsG) { x.material.opacity = f * a * o.rowsA * (1 - u) * x.userData.k; x.visible = x.material.opacity > 0.003; }
-  for (const x of o.sig) { x.material.opacity = f * a * (1 - u) * x.userData.k * (x.userData.role === 'hatch' ? o.ts.hatch : 1); x.visible = x.material.opacity > 0.003; }
+  for (const x of o.sig) { x.material.opacity = f * a * (1 - u) * x.userData.k * (x.userData.role === 'internals' ? o.ts.internals : 1); x.visible = x.material.opacity > 0.003; }
   for (const x of o.openG) { x.material.opacity = f * a * u; x.visible = x.material.opacity > 0.003; }
   for (const ln of o.lit.values()) ln.material.opacity = f * Math.min(1, a * 1.4) * (1 - u);
   o.column.material.opacity = f * o.ts.column * a;
@@ -454,37 +450,40 @@ function modAlpha(o) {
 
 // ---------------------------------------------------------------- function cards (unfolded panes)
 const cardObjs = new Map();
-// a card's outline: dead dashed in the dead hue, clone dotted in the clone hue, load-bearing
-// solid blue; the colour is a token name, read at paint time
+// Signal outlines use solid strokes that remain legible when zoomed out.
 function cardStyle(n) {
-  if (n.dead) return { key: 'dead', width: 1.6, dashed: true, dash: 0.06, gap: 0.05 };
-  if (n.clone !== null) return { key: 'clone', width: 2, dashed: true, dash: 0.02, gap: 0.045 };
+  if (n.dead) return { key: 'dead', width: 1.6 };
+  if (n.clone !== null) return { key: 'clone', width: 2 };
   if (n.lb) return { key: 'lb', width: 1.6 };
   return { key: 'cardLine', width: 1 };
 }
 // A card is an opaque face (no line runs through a name); a dead or clone card adds the
-// signal's fill over it, the dead hatch, and a solid tick in its top-right corner.
+// signal's fill over it and a solid tick in its top-right corner.
 for (const n of view.nodes) {
   if (n.x === undefined) continue;
-  const mesh = vplane(n.x, n.y, n.w, n.h, n.z + 0.012, tmat('card', 0), 2);
+  const mesh = vplane(n.x, n.y, n.w, n.h, n.z + 0.012, tmat('card', 0), 2.1);
+  // The card is the carrier surface; unlike its decals, it must occlude geometry.
+  mesh.material.depthWrite = true;
+  mesh.material.polygonOffsetFactor = 1;
+  mesh.material.polygonOffsetUnits = 2;
+  mesh.renderOrder = 2;
   mesh.userData = { type: 'node', id: n.id };
   const st = cardStyle(n);
-  const border = mkLine(rectLoop(n.x, n.y, n.w, n.h, n.z + 0.014), { width: st.width, dashed: st.dashed, dash: st.dash, gap: st.gap, order: 2, opacity: 0 });
+  const border = mkLine(rectLoop(n.x, n.y, n.w, n.h, n.z + 0.014), { width: st.width, dashed: st.dashed, dash: st.dash, gap: st.gap, order: 2.4, opacity: 0 });
   paintLine(border, C[st.key], null, 5);
   mesh.visible = border.visible = false;
   scene.add(mesh, border);
   const sigKey = n.dead ? 'dead' : n.clone !== null ? 'clone' : null;
   const extra = [];
   if (sigKey) {
-    extra.push([vplane(n.x, n.y, n.w, n.h, n.z + 0.0125, tmat(sigKey + 'Fill', 0), 2), sigKey + 'Fill']);
-    if (n.dead) extra.push([vplane(n.x, n.y, n.w, n.h, n.z + 0.013, hatchMat(n.w, n.h, 'dead', 0), 2), 'hatch']);
-    extra.push([vplane(n.x + n.w - 0.17, n.y - 0.04, 0.13, 0.13, n.z + 0.017, tmat(sigKey, 0), 2), 'tick']);
+    extra.push([vplane(n.x, n.y, n.w, n.h, n.z + 0.0125, tmat(sigKey + 'Fill', 0), 2.2), sigKey + 'Fill']);
+    extra.push([vplane(n.x + n.w - 0.17, n.y - 0.04, 0.13, 0.13, n.z + 0.017, tmat(sigKey, 0), 2.5), 'tick']);
   }
-  if (n.lb && !n.dead) extra.push([vplane(n.x + 0.03, n.y - 0.05, 0.06, n.h - 0.1, n.z + 0.016, tmat('lb', 0), 2), 'bar']);
+  if (n.lb && !n.dead) extra.push([vplane(n.x + 0.03, n.y - 0.05, 0.06, n.h - 0.1, n.z + 0.016, tmat('lb', 0), 2.5), 'bar']);
   for (const [m] of extra) { m.visible = false; scene.add(m); }
   cardObjs.set(n.id, { n, mesh, border, extra, st, a: 1, ta: 1 });
 }
-const extraAlpha = (role) => (role === 'deadFill' ? C.deadFillA : role === 'cloneFill' ? C.cloneFillA : role === 'hatch' ? 0.9 : 1);
+const extraAlpha = (role) => (role === 'deadFill' ? C.deadFillA : role === 'cloneFill' ? C.cloneFillA : 1);
 // a card shows once its module is unfolded past it
 function revealed(n) { const o = modObjs.get(n.module); return n.y - n.h >= -o.h - 1e-3; }
 function cardAlpha(o) {
@@ -525,27 +524,27 @@ function buildBox(cl) {
   g.add(edges);
   const zf = d + 0.004;
   const flat = [];
-  const head = vplane(0, 0, w, D.box_head, zf, basic(C.boxHead), 2);
+  const head = vplane(0, 0, w, D.box_head, zf, basic(C.boxHead), 2.1);
   g.add(head); flat.push(head);
   const mw = cl.w;
   const rows = cl.data_only ? [] : cl.public.concat(open ? cl.private : []);
   rows.forEach((m, i) => {
     const n = N.get(m), y = -D.box_head - D.box_row * i;
     if (n.clone !== null) {
-      const f = vplane(0.03, y - 0.01, mw - 0.06, D.box_row - 0.02, zf + 0.0008, basic(C.cloneFill, C.cloneFillA), 2);
+      const f = vplane(0.03, y - 0.01, mw - 0.06, D.box_row - 0.02, zf + 0.0008, basic(C.cloneFill, C.cloneFillA), 2.2);
       f.userData.alpha = C.cloneFillA; g.add(f); flat.push(f);
-      const u = mkLine([0.16, y - D.box_row + 0.035, zf + 0.002, mw - 0.12, y - D.box_row + 0.035, zf + 0.002], { width: 2.2, dashed: true, dash: 0.03, gap: 0.045, order: 2 });
+      const u = mkLine([0.16, y - D.box_row + 0.035, zf + 0.002, mw - 0.12, y - D.box_row + 0.035, zf + 0.002], { width: 1.5, order: 2 });
       paintLine(u, C.clone, null, 2); g.add(u);
     }
-    if (n.lb) { const bar = vplane(0.05, y - 0.05, 0.045, D.box_row - 0.1, zf + 0.001, basic(C.lb), 2); g.add(bar); flat.push(bar); }
+    if (n.lb) { const bar = vplane(0.05, y - 0.05, 0.045, D.box_row - 0.1, zf + 0.001, basic(C.lb), 2.5); g.add(bar); flat.push(bar); }
   });
   if (open && cl.private.length) {
     const y = -D.box_head - D.box_row * cl.public.length;
-    const div = vplane(0.03, y + 0.02, mw - 0.06, 0.05, zf + 0.001, basic(0xffffff, 0.9, { map: HATCH }), 2);
+    const div = vplane(0.03, y + 0.02, mw - 0.06, 0.05, zf + 0.001, basic(C.boxHead, 0.9), 2.1);
     g.add(div); flat.push(div);
   }
   if (!open && cl.private.length) {
-    const tail = vplane(0.03, -h + D.box_tail + 0.01, w - 0.06, D.box_tail - 0.04, zf + 0.001, basic(0xffffff, 0.85, { map: HATCH }), 2);
+    const tail = vplane(0.03, -h + D.box_tail + 0.01, w - 0.06, D.box_tail - 0.04, zf + 0.001, basic(C.boxHead, 0.85), 2.1);
     g.add(tail); flat.push(tail);
   }
   const fieldMarks = [];
@@ -572,6 +571,9 @@ function buildBox(cl) {
       }
     });
   }
+  for (const child of g.children) {
+    if (child.isLine2 || child.isLineSegments2) child.renderOrder = 2.4;
+  }
   g.position.set(cl.x, cl.y, cl.z);
   scene.add(g);
   const o = { cl, group: g, box, mats, edges, flat, fieldMarks, open, lift: prev ? prev.lift : 0, liftTarget: open ? 1 : 0, a: prev ? prev.a : 1, ta: prev ? prev.ta : 1 };
@@ -586,7 +588,7 @@ function boxAlpha(o) {
   o.group.visible = a > 0.003;
   o.mats.forEach((m) => (m.opacity = a));
   o.edges.material.opacity = a;
-  o.flat.forEach((m) => (m.material.opacity = a * (m.material.map ? 0.85 : m.userData.alpha ?? 1)));
+  o.flat.forEach((m) => (m.material.opacity = a * (m.userData.alpha ?? 1)));
   o.group.children.forEach((c) => { if (c.isLine2) c.material.opacity = a * (c.userData.method ? 0.55 : 1); });
 }
 for (const cl of view.classes) buildBox(cl);
@@ -654,7 +656,7 @@ function mkStrand(pts, o = {}) {
   geo.setPositions(arr);
   const mat = new TaperMaterial({
     color: 0xffffff, linewidth: o.width ?? 1.5, vertexColors: true, transparent: true, opacity: 0,
-    dashed: !!o.dashed, dashSize: o.dash ?? 0.1, gapSize: o.gap ?? 0.08, depthWrite: false, fog: true,
+    dashed: !!o.dashed, dashSize: Math.max(2, (o.dash ?? 0.1) * 40), gapSize: Math.max(2, (o.gap ?? 0.08) * 40), depthWrite: false, fog: true,
   });
   mat.resolution.set(W, H);
   lineMats.push(mat);
@@ -676,7 +678,7 @@ function setStrandPts(s, pts) {
   paintStrand(s, s.lastA ?? 0xffffff, s.lastB, s.lastFade ?? null);
 }
 
-// ---- ends and variants (strata-lines). Python wrote every call's path for every state of
+// ---- ends and variants. Python writes every call's path for every state of
 // its two ends: f the module is a folded box, o unfolded, x unfolded with the end's class
 // block opened. A call takes the path of the current state; while a block lifts open (or
 // settles) the o and x paths, which have one shape, are blended by the lift.
@@ -815,7 +817,7 @@ view.clones.forEach((group) => {
   for (let k = 0; k + 1 < group.length; k++) {
     if (N.get(group[k]).module === N.get(group[k + 1]).module) continue; // the row's violet underline says it
     const pts = routeClone(group[k], group[k + 1]);
-    // heavier and denser than v2's (1.6 px, 0.06/0.09): the chord must read at the overview
+    // Heavy enough for the chord to read at the overview.
     const line = tpaint(mkLine(pts, { width: 2.4, dashed: true, dash: 0.05, gap: 0.07, order: 3 }), 'clone', pts.length / 3);
     scene.add(line);
     cloneObjs.push({ ida: group[k], idb: group[k + 1], line, pts, a: 1, ta: 1 });
@@ -971,7 +973,7 @@ function selectionSet() {
   return { depth, edges, classes, ...foldedView(depth, edges, classes), ribbon };
 }
 
-let SEL = null, FOCUS = new Set();
+let SEL = null;
 // What the reader points at, as the brightest marks: the call lines hovered in the source
 // (their calls and callees), or a lit function or class hovered in the picture while
 // something is lit (it and its lit calls). The rest of the lit set steps down one notch.
@@ -1044,10 +1046,10 @@ function applyEmphasis(kind = 'hover') {
   const gFocus = G ? new Set(G.focus) : null, evid = G ? new Set(G.evidence) : new Set();
   const evidSlots = new Set([...evid].map((id) => `${moduleOf(id)}|${slotOf(id)}`));
   const hs = hov ? `${moduleOf(hov)}|${slotOf(hov)}` : null;
-  // a call hovered in the picture (strata-lines) isolates it: both ends take the lit outline
+  // A call hovered in the picture isolates it: both ends take the lit outline.
   const hcEdge = hl && hl.startsWith('call:') ? view.edges[+hl.slice(5)] : null;
   const hcEnds = new Set(hcEdge ? [hcEdge.s, hcEdge.t] : []);
-  // the call lines hovered in the source (strata-inspector): their calls and callees are the
+  // Call lines hovered in the source: their calls and callees are the
   // brightest marks, the rest of what is lit steps down one notch (colour only, nothing moves)
   const HC = hoverFocus(), hcT = HC ? HC.targets : new Set();
   const hcSlots = new Set([...hcEnds, ...hcT].map((id) => `${moduleOf(id)}|${slotOf(id)}`));
@@ -1055,7 +1057,7 @@ function applyEmphasis(kind = 'hover') {
   const insp = state.inspect && (state.inspect.kind === 'node' || state.inspect.kind === 'class') ? state.inspect.id : null;
   // a pill step (the stub rule, prepare.py) draws no line off the root's row
   const offE = new Set(G && G.stub === 'pill' ? G.off_edges : []);
-  // nothing outside a scope may hide it (strata-lines): rows in front of the scope are cut
+  // Nothing outside a scope may hide it: rows in front of the scope are cut
   // away, boxes outside it are silhouettes (outline only, no fill, no depth)
   const occ = occScope();
   updateCut(occ);
@@ -1130,13 +1132,17 @@ function applyEmphasis(kind = 'hover') {
     const line = SEL ? [TIER.edge, 1] : S.plate;
     paintLine(o.outline, line[0], null, 5);
     o.outline.material.linewidth = line[1];
+    o.frame.material.color.set(line[0]);
+    o.frame.material.opacity = a * 0.6;
+    o.frame.visible = !o.d.modules.some((m) => state.open.has(m));
+    o.walls.visible = o.frame.visible && (!occ || o.d.modules.some((m) => occ.has(m)));
   }
   const maxD = SEL ? Math.max(1, ...SEL.edges.values()) : 1;
   const wave = REDUCED || !pulsed ? 0 : Math.min(35, 350 / (maxD + 1));
   const traced = SEL?.trace?.size > 0;
-  // module pairs drawn call by call (strata-lines): an unfolded end whose partner is in the
+  // Module pairs drawn call by call: an unfolded end whose partner is in the
   // scope, or a pair hovered, selected, lit or clicked while both ends show their rows, or a
-  // pair whose call the reader points at in the inspector's source (strata-v3)
+  // pair whose call the reader points at in the inspector's source
   const rowsOn = (m) => state.open.has(m) || modObjs.get(m).rowsTa === 1;
   // a call hovered in the picture keeps its own pair in focus, so its curve stays under the pointer
   const hcEdges = [...(HC ? HC.edges : []), ...(hl && hl.startsWith('call:') ? [+hl.slice(5)] : [])];
@@ -1150,7 +1156,6 @@ function applyEmphasis(kind = 'hover') {
     else if (SEL && SEL.bundles.has(i) && SEL.modules.has(b.s) && SEL.modules.has(b.t)) focus.add(i);
     else if (hcBundles.has(i)) focus.add(i);
   });
-  FOCUS = focus;
   for (const i of focus) for (const m of [view.bundles[i].s, view.bundles[i].t]) {
     const o = modObjs.get(m);
     if (o.tier === 3 && !o.sil && o.ta > 0.2) styleBox(o, 2);
@@ -1190,7 +1195,7 @@ function applyEmphasis(kind = 'hover') {
     if (pulsed && lit && a > 0) { o.a = Math.min(o.a, 0.06); tgt(o, a, wave * SEL.edges.get(o), true); } else tgt(o, a);
     // a traced path is the brightest line; the rest of its pipeline stays lit one step down
     const rest = G ? (gFocus.has(ms) && gFocus.has(mt) ? TIER.link : TIER.edge) : S.call;
-    let base = hot || tr ? C.lit : lit ? (HC ? DOWN() : traced ? mix(C.lit, C.bg, 0.35) : C.lit) : o.e.dead ? C.dead : rest; // a dead call keeps the dead hue (strata-v3)
+    let base = hot || tr ? C.lit : lit ? (HC ? DOWN() : traced ? mix(C.lit, C.bg, 0.35) : C.lit) : o.e.dead ? C.dead : rest; // a dead call keeps the dead hue
     if (hci !== null && hci !== o.ei) base = TIER.edge;
     const cb = mix(base, C.bg, hot || lit ? 0.35 : 0.5);
     // a guide step draws a call between two modules it is about in full, never as a stub
@@ -1351,6 +1356,7 @@ function stepAlphas(now) {
   for (const o of plateObjs.values()) if (stepA(o, now)) {
     moving = true;
     o.plate.material.opacity = 0.92 * (0.5 + 0.5 * o.a); o.outline.material.opacity = o.a;
+    o.frame.material.opacity = o.a * 0.6;
   }
   for (const o of edgeObjs) if (stepA(o, now) || (o.inner && growing.has(o.m))) {
     moving = true;
@@ -1449,7 +1455,7 @@ function useCamera(wantOrtho) {
   controls.update();
   dirty = true; schedule();
 }
-// ---------------------------------------------------------------- the scope's protection (strata-lines)
+// ---------------------------------------------------------------- scope protection
 // In a scoped view nothing outside the scope may hide it: one clipping plane cuts away every
 // row in front of the scope's front row (whatever the camera does: zoom, orbit, pan), and
 // boxes outside the scope are silhouettes (outline only). The scope of a package or module
@@ -1463,7 +1469,7 @@ function occScope() {
   if (SEL && state.selected && (state.pulse || lastFit === 'sel')) return new Set(SEL.modules);
   return null;
 }
-// a guide step's scope: the modules it touches; a pill step (strata-inspector's stub rule)
+// A guide step's scope is the modules it touches; a pill step uses the stub rule
 // faces its root's row, so only that row's modules stand in front of the cut
 function stepScope(G) {
   if (G.lod === 'plate') return null;
@@ -1493,9 +1499,23 @@ function sceneBounds(modules, { plan = false, focus = false } = {}) {
     const p = PANE.get(m), b = p.box;
     const roof = plan ? 0.6 : all ? 0.4 : crossStub(m) ? R.skyBase(p.plate) + 0.6 : R.bandTop(p.plate) + 0.45;
     for (const x of [b.x - G, b.x + b.w + G]) {
-      if (plan) pts.push(V(x, F.ground, p.z + D.plate_front), V(x, F.ground, p.z - D.plate_back - 0.6));
+      if (plan) {
+        for (const y of [Math.min(F.ground, boxBottom(m)), 0.9]) {
+          pts.push(V(x, y, p.z + D.plate_front), V(x, y, p.z - D.plate_back - 0.6));
+        }
+      }
       else pts.push(V(x, roof, p.z + b.d), V(x, boxBottom(m) - 0.25, p.z + b.d));
       if (all && !plan) pts.push(V(x, F.ground, p.z + D.plate_front));
+    }
+  }
+  if (!focus) {
+    for (const unit of new Set(modules.map((m) => PANE.get(m).plate))) {
+      const pl = PLATE.get(unit);
+      if (pl.modules.some((m) => state.open.has(m))) continue;
+      const bottom = plan ? F.ground : -Math.max(...pl.modules.map((m) => PANE.get(m).box.h)) - 0.3;
+      for (const x of [pl.x, pl.x + pl.w]) for (const z of [pl.z - D.plate_back, pl.z + D.plate_front]) {
+        pts.push(V(x, 0.9, z), V(x, bottom, z));
+      }
     }
   }
   if (!all && !plan && !focus) {
@@ -1534,94 +1554,25 @@ function moduleFrame(m) {
   return near;
 }
 // the free picture rectangle a fit frames into [x0, x1, y0, y1]: beside the open inspector
-function picRect() { return [PAD_L + 18, W - Math.max(PAD_R, inspPx()) - 18, PAD_T + 16, H - PAD_B - 14]; }
-function fit(bounds, az, el, margin = 1.04, cutZ = null, rect = picRect()) {
-  const pts = (bounds.pts ?? [bounds.min, bounds.max]).filter((q) => cutZ === null || q.z <= cutZ);
-  const target = bounds.getCenter(V());
-  const dir = V(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
-  const size = bounds.getSize(V());
-  let dist = Math.max(size.x, size.y, size.z) * 1.6 + 5;
-  const cam = persp.clone();
-  const rw = rect[1] - rect[0], rh = rect[3] - rect[2];
-  let bw = 0, bh = 0;
-  for (let it = 0; it < 6; it++) {
-    cam.position.copy(target).addScaledVector(dir, dist);
-    cam.near = 0.5;
-    cam.lookAt(target);
-    cam.updateMatrixWorld();
-    cam.updateProjectionMatrix();
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const q of pts) {
-      const v = q.clone().project(cam);
-      const sx = (v.x + 1) / 2 * W, sy = (1 - v.y) / 2 * H;
-      x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
-    }
-    const scale = Math.max((x1 - x0) / rw, (y1 - y0) / rh) / margin;
-    bw = (x1 - x0) / scale; bh = (y1 - y0) / scale;
-    const perPx = (2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / H;
-    const right = V().setFromMatrixColumn(cam.matrixWorld, 0), up = V().setFromMatrixColumn(cam.matrixWorld, 1);
-    target.addScaledVector(right, ((x0 + x1) / 2 - (rect[0] + rect[1]) / 2) * perPx);
-    target.addScaledVector(up, -((y0 + y1) / 2 - (rect[2] + rect[3]) / 2) * perPx);
-    dist *= scale;
-  }
-  const cx = (rect[0] + rect[1]) / 2, cy = (rect[2] + rect[3]) / 2;
-  return { target, position: target.clone().addScaledVector(dir, dist), ortho: false,
-    box: [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], ppu: H / (2 * dist * Math.tan(THREE.MathUtils.degToRad(persp.fov) / 2)) };
+function picRect() {
+  const bottom = W < 720 && panelMode ? $('#panel').getBoundingClientRect().top - frameEl.getBoundingClientRect().top - 16 : H - PAD_B - 14;
+  const top = PAD_T + 12;
+  return [18, W - inspPx() - 18, top, Math.max(top + 100, bottom)];
 }
-// the orthographic fit: the zoom that fits the bounds in the picture, the target centred in it
-function fitOrtho(bounds, az, el, margin = 1.04, cutZ = null, rect = picRect()) {
-  const pts = (bounds.pts ?? [bounds.min, bounds.max]).filter((q) => cutZ === null || q.z <= cutZ);
-  const target = bounds.getCenter(V());
-  const dir = V(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
-  const cam = ortho.clone();
-  const rw = rect[1] - rect[0], rh = rect[3] - rect[2];
-  let zoom = 20, bw = 0, bh = 0;
-  for (let it = 0; it < 5; it++) {
-    cam.position.copy(target).addScaledVector(dir, ORTHO_D);
-    cam.zoom = zoom;
-    cam.lookAt(target);
-    cam.updateMatrixWorld();
-    cam.updateProjectionMatrix();
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const q of pts) {
-      const v = q.clone().project(cam);
-      const sx = (v.x + 1) / 2 * W, sy = (1 - v.y) / 2 * H;
-      x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
-    }
-    const right = V().setFromMatrixColumn(cam.matrixWorld, 0), up = V().setFromMatrixColumn(cam.matrixWorld, 1);
-    target.addScaledVector(right, ((x0 + x1) / 2 - (rect[0] + rect[1]) / 2) / zoom);
-    target.addScaledVector(up, -((y0 + y1) / 2 - (rect[2] + rect[3]) / 2) / zoom);
-    const k = Math.max((x1 - x0) / rw, (y1 - y0) / rh, 1e-6) / margin;
-    bw = (x1 - x0) / k; bh = (y1 - y0) / k;
-    zoom /= k;
-  }
-  const cx = (rect[0] + rect[1]) / 2, cy = (rect[2] + rect[3]) / 2;
-  return { target, position: target.clone().addScaledVector(dir, ORTHO_D), zoom, ortho: true, box: [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], ppu: zoom };
-}
-// the open legend's box in the picture (CSS px), or null when collapsed or hidden
-function legendBox() {
-  const el = $('#legend');
-  if (el.classList.contains('hidden') || el.classList.contains('pill')) return null;
-  const r = el.getBoundingClientRect(), f = frameEl.getBoundingClientRect();
-  return r.width ? [r.left - f.left - 6, r.top - f.top - 6, r.right - f.left + 6, r.bottom - f.top + 6] : null;
-}
-// A scoped Elevation is orthographic unless the reader asked for perspective (o). A scoped fit
-// (a package or module scope, a guide step, a pipeline) also keeps its subject out from under the
-// open legend (strata-v3): when the framed box would reach the legend's corner it frames above
-// the legend or right of it, whichever keeps the larger scale. Collapsing or opening the legend
-// moves nothing; the next fit reads its size. The overview and Plan let the legend overlay them.
-function fitGoal(bounds, az, el, margin, cutZ, scoped) {
-  const f = scoped && state.proj === 'ortho' ? fitOrtho : fit;
-  const g = f(bounds, az, el, margin, cutZ);
-  const L = scoped ? legendBox() : null;
-  if (!L || !overlaps(g.box, L)) return g;
-  const r = picRect();
-  const above = f(bounds, az, el, margin, cutZ, [r[0], r[1], r[2], Math.max(r[2] + 200, L[1])]);
-  const beside = f(bounds, az, el, margin, cutZ, [Math.min(r[1] - 200, L[2]), r[1], r[2], r[3]]);
-  return above.ppu >= beside.ppu ? above : beside;
+function fitGoal(bounds, az, el, margin = 0.92, cutZ = null) {
+  return fitCamera(state.proj === 'ortho' ? ortho : persp, bounds, {
+    width: W, height: H, rect: picRect(), az, el, margin: Math.min(margin, 0.92), cutZ,
+  });
 }
 let flight = null;
 function flyTo(goal, ms = 360) {
+  if (goal.box) {
+    const distance = goal.position.distanceTo(goal.target);
+    controls.minDistance = distance / 8; controls.maxDistance = distance * 4;
+    controls.minZoom = (goal.zoom ?? 1) / 4; controls.maxZoom = (goal.zoom ?? 1) * 8;
+    controls.cursor.copy(goal.target);
+    controls.maxTargetRadius = Math.max(...sceneBounds(frameModules()).getSize(V()).toArray()) * 1.5;
+  }
   if (REDUCED) ms = 0;
   if (!!goal.ortho !== !!camera.isOrthographicCamera) useCamera(!!goal.ortho);
   if (camera.isOrthographicCamera && goal.zoom === undefined) goal.zoom = camera.zoom;
@@ -1657,7 +1608,6 @@ const PRESET = {
   axo: { az: -0.3, el: 0.82 },
   plan: { az: 0, el: 1.5 },
   elev: { az: 0, el: 0.06 },
-  elevRaised: { az: -0.12, el: 0.5 },
 };
 const LEVEL_WEIGHT = {
   axo: { call: 1, sky: 1, imp: 0.6, clone: 1 },
@@ -1676,18 +1626,15 @@ function goView(name, ms = 700) {
   state.view = name;
   applyEmphasis('scope');
   document.querySelectorAll('#views [data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === name));
-  const s = scopeModules();
-  const spread = s && new Set([...s].map((m) => PANE.get(m).row)).size > 1;
-  const pr = name === 'elev' && spread ? PRESET.elevRaised : PRESET[name];
-  const goal = fitGoal(sceneBounds(frameModules(), { plan: name === 'plan', focus: !!focusModule() }), pr.az, pr.el, name === 'plan' ? 0.93 : 1.02, cut, name === 'elev' && !!s);
+  const pr = PRESET[name];
+  const goal = fitGoal(sceneBounds(frameModules(), { plan: name === 'plan', focus: !!focusModule() }), pr.az, pr.el, name === 'plan' ? 0.93 : 1.02, cut);
   flyTo(goal, ms);
   lastFit = 'view';
   writeHash();
 }
 let lastFit = null;
-// strata-v2 cut the scope's front by the camera's near plane and dropped the cut as soon as
-// the reader zoomed or orbited; the cut is now a clipping plane that follows the scope
-controls.addEventListener('start', () => { lastFit = null; });
+// The section clipping plane follows the scope while the reader zooms or orbits.
+controls.addEventListener('start', () => { flight = null; lastFit = null; });
 
 // ---------------------------------------------------------------- labels
 const _v = V();
@@ -1712,12 +1659,27 @@ function textWidth(text, font) {
   if (w === undefined) { lx.font = font; lx.letterSpacing = '0px'; w = lx.measureText(text).width; measureCache.set(key, w); }
   return w;
 }
+// Canvas labels must obey the same occlusion as the WebGL faces beneath them.
+const labelRay = new THREE.Raycaster();
+const labelPoint = new THREE.Vector3(), labelNdc = new THREE.Vector2();
+let labelBodies = [];
+function labelVisible(x, y, z) {
+  labelPoint.set(x, y, z).project(camera);
+  if (Math.abs(labelPoint.x) > 1 || Math.abs(labelPoint.y) > 1 || Math.abs(labelPoint.z) > 1) return false;
+  labelNdc.set(labelPoint.x, labelPoint.y);
+  labelRay.setFromCamera(labelNdc, camera);
+  labelPoint.set(x, y, z);
+  labelRay.far = labelRay.ray.origin.distanceTo(labelPoint) - 0.04;
+  return !labelRay.intersectObjects(labelBodies, false).some((h) =>
+    (cut === null || h.point.z <= cut) && (cutBack === null || h.point.z >= cutBack));
+}
 // every drawn label is logged (census: count, smallest size, cut names)
 const labelLog = [];
 // Text printed on a face, anchored at (x0,y) running toward (x1,y), at the first size in
 // o.sizes the face can hold (o.room x size px tall) with at least o.minChars characters
 // left after truncation (o.whole: the full text or nothing). Nothing is drawn below TYPE.S.
 function onFace(x0, x1, y, z, text, o) {
+  if (![x0, (x0 + x1) / 2, x1].every((x) => labelVisible(x, y, z))) return false;
   const A = scr(x0, y, z), B = scr(x1, y, z);
   if (A[2] > 1 || B[2] > 1) return false;
   const len = Math.hypot(B[0] - A[0], B[1] - A[1]);
@@ -1813,6 +1775,7 @@ function drawTag(text, L, o) {
   lx.globalAlpha = 1;
 }
 function tag(x, y, z, text, o = {}) {
+  if (!o.at && !labelVisible(x, y, z)) return false;
   const P = o.at ?? scr(x, y, z);
   if (P[2] > 1) return false;
   const L = labelRect(P, text, o);
@@ -1823,6 +1786,7 @@ function tag(x, y, z, text, o = {}) {
   return true;
 }
 function tagSearch(x, y, z, text, o, offsets) {
+  if (!o.at && !labelVisible(x, y, z)) return false;
   const P = o.at ?? scr(x, y, z);
   if (P[2] > 1) return false;
   let best = null;
@@ -1832,6 +1796,7 @@ function tagSearch(x, y, z, text, o, offsets) {
     if (!best || cost < best.cost) best = { L, cost };
     if (cost === 0) break;
   }
+  if (best.cost > 0 && !o.force) return false;
   placed.push(best.L.rect);
   drawTag(text, best.L, o);
   return true;
@@ -1864,19 +1829,24 @@ function anchorTop(id) {
   return [b.x + b.w / 2, -s.y, p.z + b.d + 0.01];
 }
 let hoverLabelDrawn = false, picRight = 1280;
-const CALLOUT_BUDGET = 8; // a guide step names at most this many lit, unnamed rows or cards in pills
+const CALLOUT_BUDGET = 6; // floating labels supplement the face text without covering the map
 function drawLabels() {
   lx.setTransform(DPR, 0, 0, DPR, 0, 0);
   lx.clearRect(0, 0, W, H);
   placed.length = 0;
   labelLog.length = 0;
+  labelBodies = [
+    ...[...plateObjs.values()].filter((o) => o.walls.visible).flatMap((o) => o.walls.children),
+    ...[...modObjs.values()].filter((o) => o.body.visible && !cutAway(o.p.module)).map((o) => o.body),
+    ...[...boxObjs.values()].filter((o) => o.group.visible).map((o) => o.box),
+  ];
   hoverLabelDrawn = false;
   const G = guideStep(), ctx = viewCtx();
   const gFocus = G ? new Set(G.focus) : null;
   const HC = hoverFocus();
   const hcLine = state.hoverLine?.startsWith('call:') ? view.edges[+state.hoverLine.slice(5)] : null;
   const hotId = (id) => state.hover === id || state.selected?.id === id || state.inspect?.id === id || (!!HC && HC.targets.has(id)) || (!!hcLine && (hcLine.s === id || hcLine.t === id));
-  // Label budget per view (docs/plans/strata-hierarchy.md, on the surface track's marks):
+  // Label budget per view, on the surface track's marks:
   //   overview  package names (L); on hover or selection, the modules involved (M)
   //   plan      package names (L), module names (S)
   //   package   module names (L) in a header row, public rows (M or S), port labels (S)
@@ -1887,16 +1857,18 @@ function drawLabels() {
   picRight = W - insp;
   placed.push([0, 0, PAD_L, H], [0, 0, W, PAD_T + 10], [PAD_L, H - PAD_B + 4, W, H]);
   if (insp) placed.push([W - insp, 0, W, H]);
-  for (const id of ['#key', '#help', '#legend']) if (!$(id).classList.contains('hidden')) { const r = $(id).getBoundingClientRect(), f = frameEl.getBoundingClientRect(); placed.push([r.left - f.left - 4, r.top - f.top - 4, r.right - f.left + 4, r.bottom - f.top + 4]); }
+  for (const id of ['#key', '#help', '#panel', '#cameraTools']) if (!$(id).classList.contains('hidden')) { const r = $(id).getBoundingClientRect(), f = frameEl.getBoundingClientRect(); placed.push([r.left - f.left - 4, r.top - f.top - 4, r.right - f.left + 4, r.bottom - f.top + 4]); }
   lx.textBaseline = 'alphabetic';
-  // ---- package names on each plate's front edge, sliding clear of the row in front
+  // ---- one package name on its enclosure; Plan keeps the label on the base
   const pkgColour = G ? (G.lod === 'plate' ? T.text : T.muted) : ctx === 'module' ? T.dim : ctx === 'package' || SEL ? T.muted : T.text;
   const fronts = state.view === 'plan' ? [] : [...modObjs.values()].filter((o) => o.a > 0.2).map((o) => ({ row: o.p.row, open: o.u > 0.05, r: boxRect(o) })).filter((q) => q.r);
   // wide plates first: a narrow plate's name may overhang its edge, never another name
   for (const o of [...plateObjs.values()].sort((a, b) => b.d.w - a.d.w)) {
     const d = o.d;
+    const labelY = state.view === 'plan' ? F.ground : 0.9;
+    const labelZ = state.view === 'plan' ? d.z + D.plate_front : d.z - D.plate_back;
     if (o.a < 0.4) continue;
-    const A = scr(d.x, F.ground, d.z + D.plate_front), B = scr(d.x + d.w, F.ground, d.z + D.plate_front);
+    const A = scr(d.x, labelY, labelZ), B = scr(d.x + d.w, labelY, labelZ);
     if (A[2] > 1 || B[2] > 1 || Math.abs(B[0] - A[0]) < 24) continue;
     const focusPlate = !G || G.lod === 'plate' || d.modules.some((m) => gFocus.has(m));
     const text = d.name.toUpperCase(), opt = { size: TYPE.L, spacing: '0.14em', color: focusPlate ? pkgColour : T.dim, weight: 700, halo: true, dy: -4, kind: 'plate' };
@@ -1904,7 +1876,7 @@ function drawLabels() {
     let best = null;
     for (let k = 0; k < 9; k++) {
       const x = d.x + 0.3 + (k / 8) * Math.max(0, d.w - 0.6);
-      const P = scr(x, F.ground, d.z + D.plate_front), L = labelRect(P, text, opt);
+      const P = scr(x, labelY, labelZ), L = labelRect(P, text, opt);
       if (L.rect[2] > Math.max(A[0], B[0]) + 4) break;
       if (placed.some((q) => overlaps(L.rect, q))) continue;
       const hit = cover.reduce((s, r) => s + (overlaps(L.rect, r) ? (Math.min(L.rect[2], r[2]) - Math.max(L.rect[0], r[0])) * (Math.min(L.rect[3], r[3]) - Math.max(L.rect[1], r[1])) : 0), 0);
@@ -1913,12 +1885,12 @@ function drawLabels() {
     }
     if (!best) {
       // a plate narrower than its name: the name overhangs the edge where free
-      const P = scr(d.x + 0.3, F.ground, d.z + D.plate_front), L = labelRect(P, text, opt);
+      const P = scr(d.x + 0.3, labelY, labelZ), L = labelRect(P, text, opt);
       if (placed.some((q) => overlaps(L.rect, q))) continue;
       best = { L, x: d.x + 0.3 };
     }
     placed.push(best.L.rect);
-    drawTag(text, best.L, { ...opt, alpha: o.a * fogAlpha(best.x, F.ground, d.z) });
+    drawTag(text, best.L, { ...opt, alpha: o.a * fogAlpha(best.x, labelY, labelZ) });
   }
   // ---- module names, by the view's budget
   const involved = new Set();
@@ -1953,7 +1925,7 @@ function drawLabels() {
     const o = h.o, b = o.b, z = o.p.z + b.d + 0.01;
     const y = faceOn ? R.bandTop(o.p.plate) + 0.42 : state.view === 'plan' ? 0 : 0.12;
     const P = scr(b.x + (faceOn ? 0.04 : b.w / 2), y, faceOn ? z : state.view === 'plan' ? o.p.z + b.d / 2 : z);
-    if (P[2] > 1) continue;
+    if (P[2] > 1 || !labelVisible(b.x + b.w / 2, y, z)) continue;
     // a guide frame can be tighter than the header row: the name then stands just above its box
     if (faceOn && P[1] < PAD_T + 16 + 2 * (h.size + 4)) { const Q = scr(b.x + 0.04, 0.16, z); if (Q[2] <= 1) { P[0] = Q[0]; P[1] = Q[1]; } }
     const name = o.p.name + (faceOn ? '.py' : ''), font = `${h.weight} ${h.size}px ${FONT}`;
@@ -1976,6 +1948,8 @@ function drawLabels() {
     }
     if (!done && h.size === TYPE.S) continue; // Plan: a name with no free spot is left to the hover
   }
+  // Top-down views show modules and imports; function rows would overlap edge-on.
+  if (state.view === 'plan' || (ctx === 'overview' && !state.selected && !state.hover)) return;
   // ---- rows of the folded boxes: public names and ghost names, Python's lines at the
   // box's pitch, one size per name (M or S); a name that does not fit whole is not drawn
   // (a lit one gets a callout under its box, where the slot is always empty)
@@ -2007,7 +1981,7 @@ function drawLabels() {
       const color = hot ? T.lit : lit ? (HC ? T.muted : T.lit) : o.tier === 1 ? (r.kind === 'class' ? T.soft : T.text) : T.muted;
       const x0 = b.x + (r.kind === 'class' ? 0.2 : 0.18);
       // row names keep a halo in their face colour (a clone row's in its tint), so a curve that
-      // crosses a box runs under its letters and the dotted underline never cuts a letter
+      // crosses a box runs under its letters and the purple underline never cuts a letter
       const halo = r.clone ? cssHex(mixHex(C.modFront, C.cloneFill, C.cloneFillA)) : hex(r.kind === 'class' ? C.classRow : C.modFront);
       const ok = onFaceLines(x0, b.x + b.w - 0.08, -r.y, r.h, b.line, z, r.lines, { sizes: r.wrapper ? [TYPE.S] : [TYPE.M, TYPE.S], weight: BOLD(r) ? 700 : 400, color, alpha: fa * (SEL && !lit && !G ? 0.45 : 1), halo, kind: 'row' });
       if (ok) {
@@ -2063,33 +2037,35 @@ function drawLabels() {
     const hot = hotId(n.id);
     const lit = SEL && SEL.depth.has(n.id);
     const color = hot ? T.lit : n.dead || lit || (!G && ctx === 'module') ? T.text : T.muted;
-    // names on a signal card keep a halo in the card's tinted fill (the dead hatch stays behind the letters)
+    // names on a signal card keep a halo in the card's tinted fill
     const face = n.dead ? mixHex(C.card, C.deadFill, C.deadFillA) : n.clone !== null ? mixHex(C.card, C.cloneFill, C.cloneFillA) : C.card;
     const lines = n.lines ?? [n.name];
     const ok = onFaceLines(n.x + 0.1, n.x + n.w - 0.05, n.y, n.h, Math.min(0.24, n.h / lines.length), n.z + 0.02, lines, { sizes: n.wrapper ? [TYPE.S] : [TYPE.M, TYPE.S], room: 1.05, weight: BOLD(n) ? 700 : 400, alpha: fa, color, halo: cssHex(face), kind: 'card' });
     if (ok) { drawnIds.add(n.id); if (hot) hoverLabelDrawn = true; }
     else if (lit) callouts.push([SEL.depth.get(n.id), n, n.cls ? `${CL.get(n.cls).name}.${n.name}` : n.name]);
   }
-  // ---- evidence: every id a guide step cites is named, in a bold pill, where its own mark
-  // does not carry its full name (a folded internal, a row too small, a silhouette)
+  // ---- evidence: name visible guide evidence in collision-free pills when it cannot
+  // fit on its face; the panel retains the complete evidence list.
+  let budget = CALLOUT_BUDGET;
   if (G) {
     for (const id of G.evidence) {
+      if (budget <= 0) break;
       const n = N.get(id);
       if (drawnIds.has(id) || rowNamed.has(id)) continue;
       const P = anchorTop(id);
       const label = n ? (n.cls ? `${CL.get(n.cls)?.name}.${n.name}` : n.name) : CL.get(id).name;
-      tagSearch(P[0], P[1], P[2], label, { size: TYPE.M, align: 'center', dy: -6, pill: true, pillLine: K.pillLineStrong, color: T.lit, weight: 700, kind: 'callout' }, [[0, 0], [0, -18], [0, 16], [0, -36], [-90, 0], [90, 0]]);
+      if (tagSearch(P[0], P[1], P[2], label, { size: TYPE.M, align: 'center', dy: -6, pill: true, pillLine: K.pillLineStrong, color: T.lit, weight: 700, kind: 'callout' }, [[0, 0], [0, -18], [0, 16], [0, -36], [-90, 0], [90, 0]])) budget--;
     }
   }
   // ---- the stub rule's pills: a pill step ends each call that leaves the root's row at the
   // card edge (right edge going out, left edge coming in), naming the far end and its package
   if (G && G.stub === 'pill') drawPills(G, HC);
   // ---- callouts for lit rows and cards too small for their names
-  let budget = G ? CALLOUT_BUDGET : Infinity;
   const perModule = new Set(G && G.part === 'pipeline' ? G.evidence.map((id) => moduleOf(id)) : []);
   {
     const below = new Map();
     for (const { o, r } of rowCallouts) {
+      if (!hotId(r.id)) continue;
       if (G && G.evidence.includes(r.id)) continue;
       if (hidden(o.b, o.p.z + o.b.d, -r.y, -r.y - r.h)) continue; // behind an opened class block
       if (G && G.part === 'pipeline') { if (perModule.has(o.p.module)) continue; perModule.add(o.p.module); }
@@ -2258,21 +2234,26 @@ function slotAt(o, ly) {
   for (const s of slotsOf(o.b)) if (ly >= s.y && ly < s.y + s.h) return s;
   return null;
 }
-let PICK_RAW = false; // verification only: v2's picking, without the section-cut filter
 function pick(cx, cy) {
   const ndc = new THREE.Vector2((cx / W) * 2 - 1, -(cy / H) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  // only what is drawn can be hit (strata-inspector): v2's picking hit boxes the section cut
-  // hid; the cut is now a clipping plane (strata-lines), so a hit beyond it, or beyond the
+  // Only what is drawn can be hit: a hit beyond the clipping plane, or beyond the
   // camera's near and far planes, is no hit. Silhouettes are not click targets.
   raycaster.near = 0; raycaster.far = Infinity;
   const fwd = camera.getWorldDirection(V());
   const drawnHit = (h) => {
-    if (PICK_RAW) return true;
     const d = h.point.clone().sub(camera.position).dot(fwd);
     if (d < camera.near || d > camera.far) return false;
     return !((cut !== null && h.point.z > cut + 1e-3) || (cutBack !== null && h.point.z < cutBack - 1e-3));
   };
+  const walls = [...plateObjs.values()].filter((o) => o.walls.visible).flatMap((o) => o.walls.children);
+  const wallHit = raycaster.intersectObjects(walls, false).find(drawnHit);
+  if (wallHit) raycaster.far = wallHit.distance;
+  if (state.view === 'plan') {
+    const bodies = [...modObjs.values()].filter((o) => o.a > 0.1 && !o.sil).map((o) => o.body);
+    const hit = raycaster.intersectObjects(bodies, false).find(drawnHit);
+    return hit ? { kind: 'module', id: hit.object.userData.id, part: 'head' } : null;
+  }
   // a single call (a curve, a margin lane, a stub) under the pointer, within 4 px
   raycaster.params.Line2 = { threshold: 4 };
   const callLines = [...curveList, ...edgeObjs].filter((o) => o.line.visible && o.a > 0.25).map((o) => o.line);
@@ -2310,7 +2291,7 @@ function pick(cx, cy) {
   if (rh.length) return { kind: rh[0].object.userData.type, id: rh[0].object.userData.id };
   return null;
 }
-// The guide click rule (strata-inspector.md): on the path only what the step lights responds.
+// On the guide path, only what the step lights responds.
 // A lit function, class or link (tier 1: the step's lit set and its evidence) opens in the
 // inspector, the path and the camera stay; tier 2 and tier 3 marks, ground and ribbons are
 // inert to hover and click. The path is left only through Esc or Map.
@@ -2324,12 +2305,26 @@ function guideClickable(hit) {
   if (hit.kind === 'call' && SEL?.edges.has(edgeObjs[hit.id])) return { kind: 'call', id: hit.id };
   return null;
 }
-let downAt = null;
-glCanvas.addEventListener('pointerdown', (ev) => { downAt = [ev.clientX, ev.clientY]; });
+let downAt = null, dragged = false;
+glCanvas.addEventListener('pointerdown', (ev) => {
+  dragged = downAt !== null;
+  downAt = [ev.clientX, ev.clientY];
+});
+glCanvas.addEventListener('pointercancel', () => { downAt = null; });
 glCanvas.addEventListener('pointermove', (ev) => {
   const bounds = glCanvas.getBoundingClientRect();
   state.mouse = [ev.clientX - bounds.left, ev.clientY - bounds.top];
-  if (ev.buttons) return;
+  if (ev.buttons) {
+    if (downAt && Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 4) {
+      dragged = true;
+      if (orbit && ev.buttons === 1 && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && state.view !== 'axo') {
+        state.view = 'axo';
+        document.querySelectorAll('#views [data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === 'axo'));
+        applyEmphasis('scope'); writeHash();
+      }
+    }
+    return;
+  }
   const rect = glCanvas.getBoundingClientRect();
   const hit = pick(ev.clientX - rect.left, ev.clientY - rect.top);
   let hover = null, hb = null, hl = null;
@@ -2354,7 +2349,9 @@ glCanvas.addEventListener('pointerleave', () => {
   if (state.hover || state.hoverBox || state.hoverLine) { state.hover = state.hoverBox = state.hoverLine = null; applyEmphasis(); }
 });
 glCanvas.addEventListener('pointerup', (ev) => {
-  if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 4 || ev.button !== 0) return;
+  const click = downAt && !dragged && Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) <= 4 && ev.button === 0;
+  downAt = null;
+  if (!click) return;
   const rect = glCanvas.getBoundingClientRect();
   const hit = pick(ev.clientX - rect.left, ev.clientY - rect.top);
   if (state.guide !== null) {
@@ -2363,6 +2360,7 @@ glCanvas.addEventListener('pointerup', (ev) => {
     return;
   }
   if (!hit) { select(null); return; }
+  if (state.view === 'plan' && hit.kind === 'module') { setScope({ kind: 'module', id: hit.id }); showPanel('browse'); return; }
   if (hit.module && !state.scope) { setScope({ kind: 'package', id: PANE.get(hit.module).district }); return; }
   if (hit.kind === 'node') select({ kind: 'node', id: hit.id });
   else if (hit.kind === 'class' && hit.module) select({ kind: 'class', id: hit.id });
@@ -2375,7 +2373,7 @@ glCanvas.addEventListener('pointerup', (ev) => {
     else if (hit.part !== 'body' || state.open.has(hit.id)) toggleModule(hit.id);
   } else if (hit.kind === 'link' || hit.kind === 'plateribbon' || hit.kind === 'call') select({ kind: hit.kind, id: hit.id });
 });
-// ---------------------------------------------------------------- keyboard (strata-lines)
+// ---------------------------------------------------------------- keyboard
 // The arrow keys move the view by a fixed share of the picture (Shift: three times as far),
 // + and - zoom about the picture's centre, Home fits the scope again, Esc goes up one level.
 // In the guide Left and Right keep stepping and Up and Down pan. Every key is an explicit
@@ -2387,28 +2385,29 @@ function camBase() {
 }
 function panBy(fx, fy) {
   const b = camBase();
-  const insp = inspPx();
-  const pw = W - PAD_L - Math.max(PAD_R, insp), ph = H - PAD_T - PAD_B;
+  const rect = picRect(), pw = rect[1] - rect[0], ph = rect[3] - rect[2];
   const perPx = camera.isOrthographicCamera ? 1 / b.zoom : (2 * b.position.distanceTo(b.target) * Math.tan(THREE.MathUtils.degToRad(persp.fov) / 2)) / H;
   camera.updateMatrixWorld();
   const right = V().setFromMatrixColumn(camera.matrixWorld, 0), up = V().setFromMatrixColumn(camera.matrixWorld, 1);
   const d = right.multiplyScalar(fx * pw * perPx).add(up.multiplyScalar(fy * ph * perPx));
+  const target = b.target.clone().add(d).sub(controls.cursor).clampLength(0, controls.maxTargetRadius).add(controls.cursor);
+  d.copy(target).sub(b.target);
   flyTo({ target: b.target.add(d), position: b.position.add(d), zoom: b.zoom, ortho: !!camera.isOrthographicCamera }, KEY_MS);
   lastFit = null;
 }
 function zoomBy(k) {
   const b = camBase();
-  if (camera.isOrthographicCamera) flyTo({ target: b.target, position: b.position, zoom: b.zoom * k, ortho: true }, KEY_MS);
-  else flyTo({ target: b.target, position: b.target.clone().add(b.position.clone().sub(b.target).multiplyScalar(1 / k)), ortho: false }, KEY_MS);
+  if (camera.isOrthographicCamera) flyTo({ target: b.target, position: b.position, zoom: clamp(b.zoom * k, controls.minZoom, controls.maxZoom), ortho: true }, KEY_MS);
+  else flyTo({ target: b.target, position: b.target.clone().add(b.position.clone().sub(b.target).setLength(clamp(b.position.distanceTo(b.target) / k, controls.minDistance, controls.maxDistance))), ortho: false }, KEY_MS);
   lastFit = null;
 }
 // Home: the frame the current state started from
-function fitHome() {
-  if (state.guide !== null) flyTo(stepGoal(STEPS[state.guide]));
-  else if (SEL && state.selected && state.pulse) fitSelection();
-  else goView(state.view);
+function fitHome(ms = 360) {
+  if (state.guide !== null) flyTo(stepGoal(STEPS[state.guide]), ms);
+  else if (SEL && state.selected && state.pulse) fitSelection(ms);
+  else goView(state.view, ms);
 }
-// Esc, one precedence for every state (strata-v3): close the help or the key overlay if open;
+// Esc has one precedence for every state: close the help or the key overlay if open;
 // else close the inspector if open; else clear the reader's selection; else, on the path,
 // leave the guide one level above the step's scope (a module step lands on its package, any
 // other on the whole map); else go up one scope level: module -> package -> all packages.
@@ -2416,7 +2415,8 @@ function fitHome() {
 function escape() {
   if (!$('#help').classList.contains('hidden')) { toggleHelp(false); return; }
   if (!$('#key').classList.contains('hidden')) { toggleKey(false); return; }
-  if (state.inspect) { closeInspector(); return; }
+  if (panelMode === 'source') { inspectorBack(); return; }
+  if (panelMode) { showPanel(null); return; }
   if (state.guide !== null) {
     const st = STEPS[state.guide];
     if (st.scope?.kind === 'module') { leaveGuide(); setScope({ kind: 'package', id: PANE.get(st.scope.id).district }); }
@@ -2442,10 +2442,10 @@ function toggleHelp(on) {
   dirty = true; schedule();
 }
 addEventListener('keydown', (ev) => {
-  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.target.closest('input, textarea, select, [contenteditable="true"]')) return;
   const k = ev.key, inGuide = state.guide !== null, step = ev.shiftKey ? PAN_SHIFT : PAN;
   // Backspace: the inspector's back control (a step it took from a call site or a link)
-  if (k === 'Backspace') { if (state.inspectBack.length) { ev.preventDefault(); inspectorBack(); } return; }
+  if (k === 'Backspace') { if (panelMode) { ev.preventDefault(); inspectorBack(); } return; }
   if (k === 'ArrowLeft' || k === 'ArrowRight') {
     ev.preventDefault();
     if (inGuide) guideGo(state.guide + (k === 'ArrowRight' ? 1 : -1));
@@ -2461,16 +2461,14 @@ addEventListener('keydown', (ev) => {
   if (k === '?' || k === 'h' || k === 'H') { toggleHelp(); return; }
   if (k === 'o' || k === 'O') { toggleProjection(); return; }
   if (k === 'k') { toggleKey(); return; }
-  if (k === 'K') { setLegend(!legendOpen); return; }
+  if (k === 'K') { toggleKey(); return; }
+  if (k === 'b' || k === 'B') { showPanel('browse'); $('#symbolSearch').focus(); return; }
   if (k === 't' || k === 'T') { setTheme(THEME === 'dark' ? 'light' : 'dark'); return; }
   // p replays the pulses of the lit set: an explicit request
   if (k === 'p' || k === 'P') { startPulses(); dirty = true; schedule(); return; }
   if (!inGuide && (k === 'g' || k === 'G')) { resumeGuide(); return; }
-  // on the path the views, unfold and open-class keys are inert: only Esc or Map leaves it
+  if (['1', '2', '3'].includes(k)) { leaveGuide(); goView({ 1: 'axo', 2: 'plan', 3: 'elev' }[k]); return; }
   if (inGuide) return;
-  if (k === '1') goView('axo');
-  if (k === '2') goView('plan');
-  if (k === '3') goView('elev');
   if ((k === 'e' || k === 'E') && state.selected) {
     const cid = state.selected.kind === 'class' ? state.selected.id : N.get(state.selected.id)?.cls;
     if (cid && state.open.has(CL.get(cid).module)) toggleClass(cid);
@@ -2487,10 +2485,10 @@ const KEYMAP = [
   ['Shift + arrow', 'move by 45 %'],
   ['+  −', 'zoom in and out about the centre'],
   ['Home', 'fit the scope again (in the guide: the step)'],
-  ['mouse', 'drag orbits · right-drag pans · wheel zooms'],
+  ['mouse / touch', 'drag orbits · right-drag pans · wheel or pinch zooms'],
   ['Esc, in this order', null],
   ['1 · overlay', 'close the help or the key'],
-  ['2 · inspector', 'close the inspector (what is lit stays)'],
+  ['2 · panel', 'return to Browse or Guide, then close the panel'],
   ['3 · selection', 'clear the selection'],
   ['4 · guide', 'leave the guide, one level above its step'],
   ['5 · scope', 'up one level: module → package → all'],
@@ -2500,9 +2498,9 @@ const KEYMAP = [
   ['Backspace', 'inspector: back to what it showed before'],
   ['u · e', 'unfold the hovered module · open the selected class'],
   ['Views', null],
-  ['1  2  3', 'Axonometric · Plan · Elevation (off the guide)'],
-  ['o', 'orthographic or perspective Elevation'],
-  ['k · Shift+K', 'the key · collapse or show the legend'],
+  ['1  2  3', 'Axonometric · Plan · Elevation (leaves the guide)'],
+  ['o', 'orthographic or perspective projection'],
+  ['b · k', 'browse / search symbols · show the key'],
   ['t', 'dark or light theme'],
   ['?', 'this help'],
   ['Guide', null],
@@ -2533,6 +2531,8 @@ function select(sel, { pulse = false, keepBack = false } = {}) {
   if (!keepBack) state.inspectBack = [];
   state.inspect = sel;
   state.hoverCall = null;
+  if (sel) showPanel('source');
+  else if (panelMode === 'source') showPanel('browse');
   applyEmphasis('select');
 }
 // Open a mark in the inspector. On the path it changes the inspector only: the step's lit
@@ -2541,23 +2541,21 @@ function select(sel, { pulse = false, keepBack = false } = {}) {
 // the inspector itself (a call site, a caller), which the back control undoes.
 function openInspector(sel, { fresh = false } = {}) {
   if (fresh) state.inspectBack = [];
-  else if (state.inspect) state.inspectBack.push(state.inspect);
-  if (state.guide !== null) { state.inspect = sel; state.hoverCall = null; applyEmphasis('hover'); }
+  else if (state.inspect) state.inspectBack.push({ ...state.inspect, scroll: $('#inspector .ibody')?.scrollTop ?? 0 });
+  if (state.guide !== null) { state.inspect = sel; state.hoverCall = null; showPanel('source'); applyEmphasis('hover'); }
   else select(sel, { keepBack: true });
 }
 function inspectorBack() {
   const prev = state.inspectBack.pop();
-  if (!prev) return;
+  if (panelMode !== 'source' || !prev) {
+    if (panelMode === 'browse' && browseModule) browseModule = null;
+    else if (panelMode === 'browse' && browsePackage) browsePackage = null;
+    else { showPanel(state.guide === null ? 'browse' : 'guide'); return; }
+    $('#symbolSearch').value = ''; renderTree(); return;
+  }
   if (state.guide !== null) { state.inspect = prev; state.hoverCall = null; applyEmphasis('hover'); }
   else select(prev, { keepBack: true });
-}
-// Closing the panel (x or Esc) keeps what is lit: off the path the selection stays in place
-// until the next Esc clears it (strata-v3's one Esc precedence); on the path the step stays.
-function closeInspector() {
-  state.inspectBack = [];
-  state.hoverCall = null;
-  state.inspect = null;
-  applyEmphasis('hover');
+  $('#inspector .ibody').scrollTop = prev.scroll ?? 0;
 }
 function toggleClass(cid, on) {
   const open = on ?? !state.expanded.has(cid);
@@ -2594,6 +2592,8 @@ function toggleModule(m, on) {
 }
 function setScope(scope, { fly = true, ms = 360 } = {}) {
   state.scope = scope;
+  browsePackage = scope ? (scope.kind === 'package' ? scope.id : PANE.get(scope.id).district) : null;
+  browseModule = scope?.kind === 'module' ? scope.id : null;
   const want = new Set(scope?.kind === 'module' ? [scope.id] : []);
   for (const m of [...state.open]) if (!want.has(m)) setOpen(m, false);
   for (const m of want) setOpen(m, true);
@@ -2624,7 +2624,7 @@ function fitSelection(ms = 360) {
   const b = new THREE.Box3().setFromPoints(pts);
   b.pts = pts;
   lastFit = 'sel';
-  const goal = fitGoal(b, pr.az, pr.el, 0.92, cutZ, name === 'elev');
+  const goal = fitGoal(b, pr.az, pr.el, 0.92, cutZ);
   flyTo(goal, ms);
   applyEmphasis('scope');
 }
@@ -2650,15 +2650,15 @@ function frameRect(id, open, openClasses) {
 function stepGoal(st) {
   if (st.camera === 'plan') {
     state.view = 'plan';
-    return fit(sceneBounds(view.panes.map((p) => p.module), { plan: true }), PRESET.plan.az, PRESET.plan.el, 0.93);
+    return fitGoal(sceneBounds(view.panes.map((p) => p.module), { plan: true }), PRESET.plan.az, PRESET.plan.el, 0.93);
   }
   if (st.camera === 'map') {
     state.view = 'axo';
     // the package map looks down a little steeper than the Axonometric: plates read as a map
-    return fit(sceneBounds(view.panes.map((p) => p.module)), PRESET.axo.az, st.lod === 'plate' ? MAP_EL : PRESET.axo.el, 1.02);
+    return fitGoal(sceneBounds(view.panes.map((p) => p.module)), PRESET.axo.az, st.lod === 'plate' ? MAP_EL : PRESET.axo.el, 1.02);
   }
-  // face: Elevation with a section cut (one row); raised: Elevation from 0.5 rad, rows stacked
-  state.view = 'elev';
+  // Multi-row guide steps use the same clear viewing angle as the map.
+  state.view = st.camera === 'raised' ? 'axo' : 'elev';
   const open = new Set(st.unfold), openClasses = new Set(st.open);
   const mods = new Set(st.frame.modules), pts = [];
   // a module chapter frames its module the way the module scope does
@@ -2691,8 +2691,8 @@ function stepGoal(st) {
   const ms = [...mods];
   const sc = [...(stepScope(st) ?? [])];
   const cutZ = Math.max(...(sc.length ? sc : ms).map((m) => PANE.get(m).z)) + CUT_FRONT;
-  const pr = st.camera === 'raised' ? PRESET.elevRaised : PRESET.elev;
-  const goal = fitGoal(b, pr.az, pr.el, 0.92, cutZ, true);
+  const pr = st.camera === 'raised' ? PRESET.axo : PRESET.elev;
+  const goal = fitGoal(b, pr.az, pr.el, 0.92, cutZ);
   // a small frame never zooms past STEP_SCALE px per unit: the step's marks keep their
   // neighbours as context and wrapped names stay compact
   if (goal.ortho) goal.zoom = Math.min(goal.zoom, STEP_SCALE);
@@ -2722,20 +2722,21 @@ function setClasses(list) {
 function guideGo(i, { ms = 360 } = {}) {
   if (i < 0 || i >= STEPS.length) return;
   const st = STEPS[i];
-  state.guide = i; state.resume = i; visited.add(i);
+  state.guide = i; state.resume = i;
   state.scope = st.scope ? { kind: st.scope.kind, id: st.scope.id } : null;
   state.selected = st.selected ? { kind: st.selected.kind, id: st.selected.id } : null;
   state.pulse = false;
   state.hover = state.hoverBox = state.hoverLine = null;
-  // a step starts with the inspector closed: its frame is the full picture
+  // Each step starts in the shared guide panel with no stale source selection.
   state.inspect = null; state.inspectBack = []; state.hoverCall = null;
+  showPanel('guide', false);
   // unfold exactly the step's modules (Python's rule), then open exactly its classes
   const want = new Set(st.unfold);
   for (const m of [...state.open]) if (!want.has(m)) setOpen(m, false);
   for (const m of want) setOpen(m, true);
   setClasses(st.open);
   renderTree(); renderCrumbs(); renderGuide();
-  renderInspector(); // before the fit: an open inspector narrows the picture
+  renderInspector();
   const goal = stepGoal(st);
   applyEmphasis('guide');
   document.querySelectorAll('#views [data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === state.view));
@@ -2748,6 +2749,7 @@ function leaveGuide({ map = false } = {}) {
   if (state.guide === null) return;
   state.guide = null;
   state.inspect = null; state.inspectBack = []; state.hoverCall = null;
+  showPanel('browse', false);
   renderGuide();
   if (map) { toMapState(); goView('axo'); }
   else { renderTree(); renderCrumbs(); applyEmphasis('scope'); }
@@ -2755,7 +2757,9 @@ function leaveGuide({ map = false } = {}) {
 }
 function toMapState() {
   state.selected = null; state.scope = null; state.pulse = false;
+  browsePackage = browseModule = null;
   state.inspect = null; state.inspectBack = []; state.hoverCall = null;
+  showPanel('browse', false);
   for (const m of [...state.open]) setOpen(m, false);
   setClasses([]);
   stopPulses();
@@ -2769,10 +2773,7 @@ function toMap() {
 }
 function renderGuide() {
   const on = state.guide !== null;
-  $('#guide').classList.toggle('hidden', !on);
-  $('#side').classList.toggle('hidden', on);
-  // on the path the view presets and the breadcrumbs are inert (Esc or Map leaves first)
-  $('#top').classList.toggle('guiding', on);
+  $('#guide').classList.toggle('hidden', panelMode !== 'guide');
   renderRail();
   if (!on) return;
   const i = state.guide, st = STEPS[i];
@@ -2780,9 +2781,10 @@ function renderGuide() {
   const where = st.part === 'chapter' ? `Step ${st.label} · chapter ${k} of ${same.length}` : st.part === 'pipeline' ? `Step ${st.label} · pipeline ${k} of ${same.length}` : `Step ${st.label} · signal ${k} of ${same.length}`;
   // qualified names may break after a dot
   const brk = (t) => esc(t).replace(/\.(?=[A-Za-z_])/g, '.​');
-  const h = [`<div class="gh"><b>Guide</b> · ${esc(GUIDE.title)}</div>`, `<div class="gp">${where}</div>`, `<h2>${esc(st.title)}</h2>`, `<p class="gb">${brk(st.body)}</p>`];
+  const h = ['<div class="guide-content">', `<div class="gh"><b>Guide</b> · ${esc(GUIDE.title)}</div>`, `<div class="gp">${where}</div>`, `<h2>${esc(st.title)}</h2>`, `<p class="gb">${brk(st.body)}</p>`];
+
   if (st.evidence.length && !st.list) {
-    // story v2 cites up to a dozen names (the entry surface): the list scrolls, the nav stays
+    // A guide step cites up to a dozen names (the entry surface): the list scrolls, the nav stays
     h.push('<div class="gs">Evidence</div><div class="fl-wrap ev-wrap">');
     for (const id of st.evidence) {
       const n = N.get(id), cl = CL.get(id);
@@ -2791,94 +2793,186 @@ function renderGuide() {
     }
     h.push('</div>');
   }
-  h.push('<div class="gs">In the picture</div><div id="gmarks"></div>');
+  h.push('<details class="guide-key"><summary>Reading this view</summary><div id="gmarks"></div></details>');
   if (st.list) {
     const total = st.list.reduce((k2, g) => k2 + g.ids.length, 0);
-    h.push(`<div class="gs">${st.part === 'pipeline' ? `${total} functions, in call order` : `${total} function${total === 1 ? '' : 's'}`}</div><div class="fl-wrap">`);
+    h.push(`<div class="gs">${total} functions · ${st.list.length} modules</div><div class="fl-wrap">`);
     for (const g of st.list) {
-      const names = g.ids.map((id) => { const n = N.get(id); return `<span class="fn" data-ev="${esc(id)}">${esc(n.cls && !g.module ? `${CL.get(n.cls).name}.${n.name}` : n.name)}</span>`; });
-      h.push(`<div class="fl"><span class="fm">${esc(g.name)}</span> ${names.join(' · ')}</div>`);
+      const label = st.list.filter((other) => other.name === g.name).length > 1 ? g.module || g.name : g.name;
+      h.push(`<details class="fl"${g.ids.includes(st.selected?.id) ? ' open' : ''}><summary><span>${esc(label)}</span><span class="fm">${g.ids.length}</span></summary>`);
+      for (const id of g.ids) {
+        const n = N.get(id);
+        const name = n.cls ? `${CL.get(n.cls).name}.${n.name}` : n.name;
+        h.push(`<button class="fn" data-ev="${esc(id)}">${esc(name)}</button>`);
+      }
+      h.push('</details>');
     }
     h.push('</div>');
-  } else h.push('<div class="grow"></div>');
-  const next = STEPS[i + 1];
-  h.push(`<div class="gnav"><button class="prev" ${i === 0 ? 'disabled' : ''} title="Previous step (←)">←</button><button class="next" ${next ? '' : 'disabled'} title="Next step (→)">${next ? `Next · ${esc(next.title)} →` : 'End of the guide'}</button></div>`);
-  h.push('<div class="hint">← → step · ↑ ↓ move · + − zoom · click a lit name to read its source · esc leaves the guide · ? keys</div>');
+  }
+  h.push('</div>');
   const el = $('#guide');
   el.innerHTML = h.join('');
-  // "In the picture" is the legend's list in long words (drawnMarks), refreshed when the step settles
+  // The guide's key follows the scene after the step settles.
   renderGuideMarks(marksOn);
   marksKey = null;
-  el.querySelector('.prev').addEventListener('click', () => guideGo(i - 1));
-  el.querySelector('.next').addEventListener('click', () => guideGo(i + 1));
   // a name in the panel opens in the inspector; the path and the camera stay
   el.querySelectorAll('[data-ev]').forEach((a) => a.addEventListener('click', () => {
     const id = a.dataset.ev;
     openInspector({ kind: CL.has(id) ? 'class' : 'node', id }, { fresh: true });
   }));
 }
-// The rail: chapters by number and title, pipeline and signal chapters as dots. Filled
-// marks are steps already read; the current one is bright.
+// One labeled selector replaces the old progress dots and duplicated next buttons.
 function renderRail() {
-  const el = $('#rail');
-  const away = state.guide === null, cur = away ? state.resume : state.guide;
-  el.classList.toggle('away', away);
-  const h = [];
-  if (away) h.push(`<button class="resume" title="Back to the step you left (g)">Resume guide ▸</button>`);
-  let prev = null;
-  STEPS.forEach((st, i) => {
-    const cls = `${i === cur ? ' cur' : ''}${visited.has(i) ? ' seen' : ''}`;
-    if (st.part === 'chapter') h.push(`<span class="seg${cls}" data-i="${i}" title="${esc(st.title)}"><b>${esc(st.label)}</b>${esc(st.title)}</span>`);
-    else {
-      if (st.part !== prev) h.push(`<span class="gl">${st.part === 'pipeline' ? 'pipelines' : 'signals'}</span>`);
-      h.push(`<i class="dot${cls}" data-i="${i}" title="${esc(st.title)}"></i>`);
-    }
-    prev = st.part;
-  });
-  h.push('<span class="sp"></span>', `<span class="count">${away ? 'exploring · ' : ''}step ${cur + 1} of ${STEPS.length}</span>`);
-  el.innerHTML = h.join('');
-  el.querySelectorAll('[data-i]').forEach((a) => a.addEventListener('click', () => guideGo(+a.dataset.i)));
-  el.querySelector('.resume')?.addEventListener('click', () => resumeGuide());
+  const away = state.guide === null, current = away ? state.resume : state.guide;
+  $('#guideStep').innerHTML = STEPS.map((st, i) => `<option value="${i}"${i === current ? ' selected' : ''}>${i + 1} · ${esc(st.title)}</option>`).join('');
+  $('#navProgress').textContent = `${away ? 'Resume' : 'Step'} ${current + 1} / ${STEPS.length}`;
+  $('#guidePrev').disabled = current === 0;
+  const last = current === STEPS.length - 1;
+  $('#guideNext').textContent = last ? 'Prompt ↗' : '→';
+  $('#guideNext').setAttribute('aria-label', last ? 'Open cleanup prompt' : 'Next tutorial step');
+  $('#guideNext').title = last ? 'Open cleanup prompt' : 'Next tutorial step';
+  $('#mapBtn').classList.toggle('on', away);
+  $('#rail').innerHTML = `<span>${away ? 'Exploring' : 'Guide'} · ${esc(STEPS[current].title)}</span><span class="count">${current + 1} / ${STEPS.length}</span>`;
 }
 function toggleKey(on) {
   const k = $('#key'), show = on ?? k.classList.contains('hidden');
   k.classList.toggle('hidden', !show);
   $('#keyBtn').classList.toggle('on', show);
-  // the key holds everything the legend does: the legend steps aside while it is open
-  $('#legend').classList.toggle('hidden', show);
+  $('#keyBtn').setAttribute('aria-expanded', String(show));
+
   dirty = true; schedule();
 }
 
-// ---------------------------------------------------------------- side panels
-// the counts beside a package or module, each behind the canvas mark in miniature
+// ---------------------------------------------------------------- unified browse / guide / source panel
+function showPanel(mode, reframe = true) {
+  const wasOpen = !$('#panel').classList.contains('hidden');
+  if (panelMode === 'browse') browseScroll = $('#browser').scrollTop;
+  panelMode = mode;
+  $('#panel').classList.toggle('hidden', !mode);
+  $('#browser').classList.toggle('hidden', mode !== 'browse');
+  $('#guide').classList.toggle('hidden', mode !== 'guide');
+  $('#navigation').classList.toggle('hidden', mode !== 'guide');
+  $('#inspector').classList.toggle('hidden', mode !== 'source');
+  $('#prompt').classList.toggle('hidden', mode !== 'prompt');
+  $('#legend').classList.toggle('hidden', mode === 'prompt');
+  for (const b of document.querySelectorAll('[data-panel]')) {
+    b.classList.toggle('on', b.dataset.panel === mode);
+    b.setAttribute('aria-selected', String(b.dataset.panel === mode));
+    b.tabIndex = b.dataset.panel === mode ? 0 : -1;
+    b.disabled = b.dataset.panel === 'source' && !state.inspect;
+  }
+  $('#browseBtn').classList.toggle('on', mode === 'browse');
+  $('#expandPanel').classList.toggle('hidden', !mode);
+  setInspectorWidth(inspW);
+  if (mode === 'browse') { renderTree(); $('#browser').scrollTop = browseScroll; }
+  if (mode === 'source') renderInspector();
+  $('#panelBack').disabled = (mode === 'guide' || mode === 'prompt') || (mode === 'browse' && !browsePackage && !browseModule);
+  dirty = true; schedule();
+  if (ready && reframe && wasOpen !== !!mode) fitHome();
+}
+function setOrbit(on) {
+  orbit = on;
+  controls.enableRotate = on;
+  controls.mouseButtons.LEFT = on ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  controls.touches.ONE = on ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
+  $('#orbitBtn').setAttribute('aria-pressed', String(on));
+  $('#orbitBtn').classList.toggle('on', on);
+  $('#cameraHint').textContent = on ? 'Drag to orbit · right-drag to pan · scroll to zoom' : 'Drag to pan · scroll to zoom';
+}
+function wirePanel() {
+  wireGrip($('#panel .grip'));
+  setOrbit(true);
+  $('#optimizationPrompt').value = optimizationPrompt;
+  $('#promptMeta').textContent = `${optimizationPrompt.trim().split(/\s+/).length} words · full evidence in .atlas/atlas.json`;
+  $('#copyPrompt').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(optimizationPrompt);
+      $('#copyStatus').textContent = 'Copied. Paste into your coding agent.';
+      $('#copyPrompt').textContent = 'Copied';
+    } catch {
+      $('#optimizationPrompt').focus(); $('#optimizationPrompt').select();
+      $('#copyStatus').textContent = 'Prompt selected. Press Ctrl+C or ⌘C to copy.';
+    }
+  });
+  $('#guideStep').addEventListener('change', (event) => guideGo(+event.target.value));
+  $('#guidePrev').addEventListener('click', () => guideGo((state.guide ?? state.resume) - 1));
+  $('#guideNext').addEventListener('click', () => {
+    const current = state.guide ?? state.resume;
+    if (current === STEPS.length - 1) showPanel('prompt');
+    else guideGo(current + 1);
+  });
+  $('#panelNav').addEventListener('keydown', (event) => {
+    if (!event.target.matches('[data-panel]') || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const tabs = [...document.querySelectorAll('[data-panel]:not(:disabled)')];
+    const next = tabs[(tabs.indexOf(event.target) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    next.click(); next.focus();
+  });
+  $('#browseBtn').addEventListener('click', () => showPanel('browse'));
+  $('#panelBack').addEventListener('click', inspectorBack);
+  $('#closePanel').addEventListener('click', () => showPanel(null));
+  $('#expandPanel').addEventListener('click', () => {
+    panelExpanded = !panelExpanded;
+    setInspectorWidth(inspW);
+    $('#expandPanel').setAttribute('aria-label', panelExpanded ? 'Restore panel width' : 'Expand panel');
+    fitHome();
+  });
+  document.querySelectorAll('[data-panel]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.panel === 'guide' && state.guide === null) resumeGuide();
+    else showPanel(b.dataset.panel);
+  }));
+  $('#symbolSearch').addEventListener('input', () => { browseScroll = 0; renderTree(); });
+  $('#fitBtn').addEventListener('click', () => fitHome());
+  $('#zoomIn').addEventListener('click', () => zoomBy(ZOOM_STEP));
+  $('#zoomOut').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
+  $('#orbitBtn').addEventListener('click', () => setOrbit(!orbit));
+}
 function marks(r) {
-  const out = [];
-  const s = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-  if (r.dead) out.push(`<span title="${s(r.dead, 'dead function')}"><i class="dead"></i> ${r.dead}</span>`);
-  if (r.clones) out.push(`<span title="${s(r.clones, 'clone')}"><i class="clone"></i> ${r.clones}</span>`);
-  if (r.load_bearing) out.push(`<span title="${s(r.load_bearing, 'load-bearing function')}"><i class="lb"></i> ${r.load_bearing}</span>`);
-  return `<span class="mk">${out.join(' ')}</span>`;
+  return `<span class="counts">${[
+    ['dead', r.dead, 'dead'], ['clone', r.clones, 'clones'], ['lb', r.load_bearing, 'load-bearing'],
+  ].filter(([, n]) => n).map(([kind, n, label]) => `<span class="count-${kind}" title="${n} ${label}">${n} ${label}</span>`).join('')}</span>`;
 }
 function renderTree() {
-  const el = $('#tree');
+  const query = $('#symbolSearch').value.trim().toLowerCase();
   const rows = [];
+  const symbols = [...view.nodes.map((n) => ({ ...n, kind: 'node' })), ...view.classes.map((c) => ({ ...c, kind: 'class' }))];
+  const symbolRow = (n) => `<button class="row symbol ${state.inspect?.id === n.id ? 'on' : ''}" data-symbol="${esc(n.id)}" data-kind="${n.kind}" title="${esc(n.id)}"><span class="symbol-icon">${n.kind === 'class' ? 'C' : 'ƒ'}</span><span class="nm">${esc(fullName(n.id))}</span>${n.dead ? '<span class="symbol-meta">dead</span>' : ''}</button>`;
   for (const d of view.districts) {
-    const ps = d.modules.map((m) => PANE.get(m)).sort((a, b) => a.row - b.row || a.x - b.x);
-    const sum = (k) => ps.reduce((s, p) => s + p[k], 0);
-    const on = state.scope?.kind === 'package' && state.scope.id === d.package;
-    rows.push(`<div class="row pkg ${on ? 'on' : ''}" data-pkg="${esc(d.package)}"><span class="nm">${esc(d.name)}</span>${marks({ dead: sum('dead'), clones: sum('clones'), load_bearing: sum('load_bearing') })}</div>`);
-    const open = state.scope && (state.scope.id === d.package || d.modules.includes(state.scope.id));
-    if (open) for (const p of ps) {
-      const mon = (state.scope?.kind === 'module' && state.scope.id === p.module) || state.open.has(p.module);
-      rows.push(`<div class="row mod ${mon ? 'on' : ''}" data-mod="${esc(p.module)}"><span class="nm">${esc(p.name)}.py</span>${marks(p)}</div>`);
+    const panes = d.modules.map((m) => PANE.get(m)).sort((a, b) => a.name.localeCompare(b.name));
+    const matching = panes.filter((p) => !query || p.module.toLowerCase().includes(query) || symbols.some((n) => n.module === p.module && n.id.toLowerCase().includes(query)));
+    if (!matching.length) continue;
+    const open = query || browsePackage === d.package;
+    rows.push(`<button class="row pkg ${browsePackage === d.package ? 'current' : ''}" data-pkg="${esc(d.package)}" aria-expanded="${!!open}"><span class="chevron">${open ? '⌄' : '›'}</span><span class="nm">${esc(d.name)}</span><span class="symbol-meta">${panes.length} modules</span></button>`);
+    if (!open) continue;
+    for (const p of matching) {
+      const expanded = query || browseModule === p.module;
+      rows.push(`<button class="row mod ${browseModule === p.module ? 'current' : ''}" data-mod="${esc(p.module)}" aria-expanded="${!!expanded}" title="${esc(p.module)}"><span class="chevron">${expanded ? '⌄' : '›'}</span><span class="nm">${esc(p.name)}.py</span></button>`);
+      if (!expanded) continue;
+      if (!query && (p.dead || p.clones || p.load_bearing)) rows.push(`<div class="module-signals">${marks(p)}</div>`);
+      const items = symbols.filter((n) => n.module === p.module && (!query || n.id.toLowerCase().includes(query))).sort((a, b) => a.line - b.line);
+      rows.push(...items.map(symbolRow));
     }
   }
-  el.innerHTML = rows.join('');
-  // the markers are the legend's swatches in miniature (the same drawing as the canvas mark)
-  const sw = swatches(), MARK_OF = { dead: 'dead', clone: 'clone', lb: 'load_bearing' };
-  el.querySelectorAll('.mk i').forEach((i) => i.replaceWith(keySwatch(sw[MARK_OF[i.className]], 34, 14, 22, 9)));
-  el.querySelectorAll('[data-pkg]').forEach((r) => r.addEventListener('click', () => setScope(state.scope?.id === r.dataset.pkg ? null : { kind: 'package', id: r.dataset.pkg })));
-  el.querySelectorAll('[data-mod]').forEach((r) => r.addEventListener('click', () => setScope({ kind: 'module', id: r.dataset.mod })));
+  $('#tree').innerHTML = rows.join('') || '<p class="empty-search">No matching modules or symbols.</p>';
+  $('#browseSummary').textContent = `${view.districts.length} packages · ${view.panes.length} modules · ${view.nodes.length} functions`;
+  $('#tree').querySelectorAll('[data-pkg]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.pkg, close = browsePackage === id;
+    leaveGuide(); setScope(close ? null : { kind: 'package', id });
+    showPanel('browse');
+  }));
+  $('#tree').querySelectorAll('[data-mod]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.mod, close = browseModule === id;
+    leaveGuide(); setScope(close ? { kind: 'package', id: PANE.get(id).district } : { kind: 'module', id });
+    showPanel('browse');
+  }));
+  $('#tree').querySelectorAll('[data-symbol]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.symbol;
+    browseScroll = $('#browser').scrollTop;
+    leaveGuide(); setScope({ kind: 'module', id: modOfId(id) }, { fly: false });
+    openInspector({ kind: b.dataset.kind, id }, { fresh: true });
+    fitHome();
+  }));
+  $('#panelBack').disabled = (panelMode === 'guide' || panelMode === 'prompt') || (panelMode === 'browse' && !browsePackage && !browseModule);
 }
 function renderCrumbs() {
   const el = $('#crumbs');
@@ -2890,7 +2984,7 @@ function renderCrumbs() {
   }
   el.innerHTML = parts.join(' ');
   el.querySelectorAll('[data-c]').forEach((a) => a.addEventListener('click', () => {
-    if (state.guide !== null) return;
+    leaveGuide();
     const c = a.dataset.c;
     setScope(c ? { kind: 'package', id: c.slice(4) } : null);
   }));
@@ -2898,7 +2992,7 @@ function renderCrumbs() {
 function nodeLink(id) {
   const n = N.get(id);
   const nm = n.cls ? `${CL.get(n.cls)?.name}.${n.name}` : n.name;
-  return `<div class="ln" data-sel="${esc(id)}">${esc(nm)} <span class="dim">${esc(n.module.split('.').pop())}</span></div>`;
+  return `<button class="ln" data-sel="${esc(id)}">${esc(nm)} <span class="dim">${esc(n.module.split('.').pop())}</span></button>`;
 }
 const KIND_NAME = { same_module: 'same module', cross_module: 'call', into_class: 'into class', intra_class: 'inside class', constructs: 'constructs' };
 const SPAN_NAME = { plate: 'same plate · track', row: 'same row · via side ports', cross_row: 'other row · arc' };
@@ -2916,16 +3010,16 @@ function lineSub(kind, id) {
 }
 // ---------------------------------------------------------------- the inspector (right side)
 // Header (name, module, line range, signal badges), then Python's source excerpt with its
-// call sites linked both ways to the picture (strata-inspector.md):
+// Call sites link both ways to the picture:
 //   source -> picture  hovering a line whose sites resolve to drawn calls lights exactly those
 //                      calls and their callees (state.hoverCall); the rest of the lit set steps
 //                      down one notch; clicking a site opens the callee (back returns)
 //   picture -> source  hovering a card, row, class, box or track lights the lines that call it
 //                      and scrolls the first into view
-// Nothing here moves the camera or a mark; the inspector only covers the picture's right side.
+// Source navigation keeps the camera steady; changing the panel's size reframes the map.
 let inspKey = null, curSrc = null, codeEl = null, lastHot = null;
+let sourceTab = 'documentation';
 const fullName = (id) => { const n = N.get(id); if (n) return n.cls && CL.has(n.cls) ? `${CL.get(n.cls).name}.${n.name}` : n.name; return CL.get(id)?.name ?? String(id); };
-const selLabel = (sel) => (sel.kind === 'node' || sel.kind === 'class' ? fullName(sel.id) : lineTitle(sel.kind, sel.id));
 const modOfId = (id) => (N.get(id) ?? CL.get(id))?.module;
 function siteTitle(s) {
   const e = view.edges[s[4]];
@@ -2937,7 +3031,10 @@ function sourceBlock(id) {
   curSrc = rec;
   const k = (kind) => rec.sites.filter((s) => s[3] === kind).length;
   const drawn = k('edge'), other = rec.sites.length - drawn;
-  return `<div class="s">source <span class="sk"><span class="u">${drawn} linked</span>${other ? ` · <i class="mk"></i> ${other} not drawn` : ''}</span></div><div class="code">${codeHtml(rec, siteTitle)}</div>`;
+  const labels = { external: 'External calls', unresolved: 'Unresolved targets', excluded: 'Excluded targets' };
+  const omitted = [...new Set(rec.sites.filter((site) => site[3] !== 'edge').map((site) => site[3]))];
+  const explanation = other ? `<details class="source-note"><summary>${other} calls outside this map</summary>${omitted.map((kind) => `<p>${esc(labels[kind] ?? kind)} · ${k(kind)}</p>`).join('')}<p>These calls remain in the source. Hover their dotted markers for details.</p></details>` : '';
+  return `<div class="s">Source <span class="sk">${drawn} linked calls</span></div>${explanation}<div class="code">${codeHtml(rec, siteTitle)}</div>`;
 }
 function signalTags(n) {
   const tags = [];
@@ -2953,7 +3050,7 @@ function signalTags(n) {
 function renderInspector() {
   const el = $('#inspector');
   const sel = state.inspect;
-  if (!sel) {
+  if (!sel || panelMode !== 'source') {
     if (!el.classList.contains('hidden')) { el.classList.add('hidden'); dirty = true; schedule(); }
     inspKey = null; curSrc = null; codeEl = null; lastHot = null;
     return;
@@ -2962,23 +3059,24 @@ function renderInspector() {
   if (key === inspKey && !el.classList.contains('hidden')) return; // emphasis changes keep the panel (and its scroll)
   inspKey = key; curSrc = null; codeEl = null; lastHot = null;
   el.classList.remove('hidden');
-  el.style.width = `${inspW}px`;
+
   dirty = true; schedule();
-  const back = state.inspectBack[state.inspectBack.length - 1];
-  const nav = `<div class="inav">${back ? `<button class="back" title="Back (Backspace)">← ${esc(selLabel(back))}</button>` : '<span class="ik">inspector</span>'}<span class="sp"></span><button class="close" title="Close (Esc)">×</button></div>`;
+  const module = sel.kind === 'node' || sel.kind === 'class' ? modOfId(sel.id) : sel.kind === 'call' ? view.edges[sel.id].ms : null;
+  const pane = PANE.get(module);
+  const nav = `<nav class="source-crumbs" aria-label="Source location"><button data-browse="root">${esc(view.package)}</button>${pane ? `<span>/</span><button data-browse="package">${esc(DIST.get(pane.district).name)}</button><span>/</span><button data-browse="module">${esc(pane.name)}.py</button>` : ''}</nav>`;
   let head = '', body = '';
   if (sel.kind === 'node') {
     const n = N.get(sel.id), rec = SRC[n.id];
     const tags = signalTags(n);
     head = `<div class="t">${esc(fullName(n.id))}</div><div class="q">${esc(n.module)} · ${rec ? `lines ${rec.start}–${rec.end}` : `line ${n.line}`}</div>${tags ? `<div class="tags">${tags}</div>` : ''}`;
-    if (n.doc && n.doc !== 'No docstring') body += `<div class="note">${esc(n.doc)}</div>`;
     body += sourceBlock(n.id);
     const callers = view.callers[n.id];
-    body += `<div class="s">called by</div>${callers.length ? callers.map(nodeLink).join('') : '<div class="v">no resolved caller</div>'}`;
-    const reach = view.reach[n.id].length - 1;
-    body += `<div class="s">static reach</div><div class="v">${reach} function${reach === 1 ? '' : 's'} below this one</div>`;
+    const calls = [...new Set(view.edges.filter((e) => e.s === n.id).map((e) => e.t))];
+    const reach = view.reach[n.id].filter(([, depth]) => depth > 0).map(([index]) => view.nodes[index].id);
+    const related = (ids) => ids.map((id) => N.has(id) ? nodeLink(id) : `<button class="ln" data-cls="${esc(id)}">${esc(fullName(id))}</button>`).join('');
+    body += `<div class="relationships"><details${callers.length ? ' open' : ''}><summary>Callers <span>${callers.length}</span></summary>${related(callers) || '<p>No resolved callers</p>'}</details><details><summary>Calls <span>${calls.length}</span></summary>${related(calls) || '<p>No resolved calls</p>'}</details><details><summary>Reaches ${reach.length} functions</summary>${related(reach) || '<p>No further functions</p>'}</details></div>`;
   } else if (sel.kind === 'call') {
-    // one call (strata-lines): both ends, and the caller's source with the call's sites lit
+    // One call: both ends, and the caller's source with the call's sites lit
     const e = view.edges[sel.id];
     head = `<div class="t">${esc(endName(e.s))} → ${esc(endName(e.t))}</div><div class="q">${esc(PANE.get(e.ms).name)}.py → ${esc(PANE.get(e.mt).name)}.py · ${KIND_NAME[e.kind]}${e.ms !== e.mt ? ' · ' + SPAN_NAME[e.span] : ''}</div>`;
     body += `<div class="s">caller</div>${nodeLink(e.s)}`;
@@ -2998,7 +3096,6 @@ function renderInspector() {
   } else {
     const cl = CL.get(sel.id), rec = SRC[cl.id];
     head = `<div class="t">${esc(cl.name)}</div><div class="q">${esc(cl.module)} · ${rec ? `lines ${rec.start}–${rec.end}` : `line ${cl.line}`}</div><div class="tags">${cl.exported ? `<span class="tag bold" title="exported from ${esc(cl.exported_from.join(', '))}">entry surface · ${esc(cl.exported_from[0] ?? '')}</span>` : ''}<span class="tag">${cl.data_only ? 'data class' : 'class'}</span>${cl.dead_private.length ? `<span class="tag dead">${cl.dead_private.length} dead private</span>` : ''}</div>`;
-    if (cl.doc && cl.doc !== 'No docstring') body += `<div class="note">${esc(cl.doc)}</div>`;
     const mlink = (id) => { const n = N.get(id); return `<span class="ml" data-sel="${esc(id)}">${esc(n.name)}${id === cl.ctor ? '()' : ''}</span>`; };
     if (cl.public.length) body += `<div class="s">constructor and public methods</div><div class="mls">${cl.public.map(mlink).join('')}</div>`;
     if (cl.private.length) body += `<div class="s">private methods</div><div class="mls">${cl.private.map(mlink).join('')}</div>`;
@@ -3008,12 +3105,38 @@ function renderInspector() {
     body += `<div class="s">constructed by</div>${makers.length ? makers.map(nodeLink).join('') : '<div class="v">no resolved constructor call</div>'}`;
     body += sourceBlock(cl.id);
   }
-  el.innerHTML = `<div class="grip" title="Drag to resize"><i></i></div><div class="ihead">${nav}${head}</div><div class="ibody">${body}</div>`;
-  el.querySelector('.back')?.addEventListener('click', () => inspectorBack());
-  el.querySelector('.close').addEventListener('click', () => closeInspector());
+  const docRec = sel.kind === 'node' || sel.kind === 'class' ? SRC[sel.id] : null;
+  let tabs = '';
+  if (docRec) {
+    head += `<pre class="signature"><code>${esc(docRec.signature)}</code></pre>`;
+    tabs = `<div class="source-tabs" role="tablist" aria-label="Symbol details">${[['documentation', 'Documentation'], ['code', 'Code']].map(([id, title]) => `<button id="source-tab-${id}" role="tab" data-source-tab="${id}" aria-controls="source-${id}" aria-selected="${sourceTab === id}" tabindex="${sourceTab === id ? 0 : -1}">${title}</button>`).join('')}</div>`;
+    body = `<section id="source-documentation" role="tabpanel" aria-labelledby="source-tab-documentation" class="docstring${sourceTab === 'documentation' ? '' : ' hidden'}">${documentationHtml(docRec.docstring)}</section><section id="source-code" role="tabpanel" aria-labelledby="source-tab-code" class="${sourceTab === 'code' ? '' : 'hidden'}">${body}</section>`;
+  }
+  el.innerHTML = `<div class="ihead">${nav}${head}</div>${tabs}<div class="ibody">${body}</div>`;
+  el.querySelectorAll('[data-source-tab]').forEach((button) => button.addEventListener('click', () => {
+    sourceTab = button.dataset.sourceTab;
+    for (const tab of el.querySelectorAll('[data-source-tab]')) {
+      const selected = tab.dataset.sourceTab === sourceTab;
+      tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+      $(`#source-${tab.dataset.sourceTab}`).classList.toggle('hidden', !selected);
+    }
+    state.hoverCall = null; lastHot = null; applyEmphasis('hover');
+  }));
+  el.querySelector('.source-tabs')?.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const next = event.key === 'Home' ? 'documentation' : event.key === 'End' ? 'code' : sourceTab === 'code' ? 'documentation' : 'code';
+    const button = $(`#source-tab-${next}`); button.click(); button.focus();
+  });
+  el.querySelectorAll('[data-browse]').forEach((b) => b.addEventListener('click', () => {
+    browsePackage = b.dataset.browse === 'root' ? null : pane.district;
+    browseModule = b.dataset.browse === 'module' ? module : null;
+    $('#symbolSearch').value = '';
+    browseScroll = 0; showPanel('browse');
+  }));
   el.querySelectorAll('[data-sel]').forEach((a) => a.addEventListener('click', () => openInspector({ kind: 'node', id: a.dataset.sel })));
   el.querySelectorAll('[data-cls]').forEach((a) => a.addEventListener('click', () => openInspector({ kind: 'class', id: a.dataset.cls })));
-  wireGrip(el.querySelector('.grip'));
+
   codeEl = el.querySelector('.code');
   for (const code of el.querySelectorAll('code[data-indent]')) {
     code.style.paddingLeft = code.dataset.indent + 'ch';
@@ -3053,7 +3176,7 @@ function hoverSourceAt(target) {
 }
 // Light the source lines that match what the reader hovers, here or in the picture.
 function syncSource() {
-  if (!codeEl || !curSrc) return;
+  if (!codeEl || !curSrc || codeEl.closest('.hidden')) return;
   let hot = new Set(), fromPicture = false;
   if (state.hoverCall) hot = state.hoverCall.sites;
   else if (state.hover || state.hoverBox || state.hoverLine) {
@@ -3092,31 +3215,39 @@ function scrollToLine(line) {
   body.scrollTop += lr.top - br.top - body.clientHeight / 3;
 }
 function setInspectorWidth(w, save = false) {
-  inspW = Math.round(clamp(w, INSP_MIN, Math.min(INSP_MAX, W - PAD_L - 160)));
-  $('#inspector').style.width = `${inspW}px`;
+  inspW = Math.round(clamp(w, INSP_MIN, INSP_MAX));
+  const width = Math.min(panelExpanded ? W * 0.7 : inspW, W - 280);
+  $('#panel').style.width = W < 720 ? 'calc(100% - 24px)' : `${Math.max(280, width)}px`;
+  $('#panel .grip').setAttribute('aria-valuemin', '280');
+  $('#panel .grip').setAttribute('aria-valuemax', String(Math.max(280, W - 280)));
+  $('#panel .grip').setAttribute('aria-valuenow', String(Math.round(width)));
+  frameEl.style.setProperty('--panel-space', panelMode && W >= 720 ? `${Math.max(280, width) + 12}px` : '0px');
   if (save) localStorage.setItem(INSP_KEY, String(inspW));
   dirty = true; schedule();
 }
-// the left edge resizes the panel; the width is remembered (localStorage)
 function wireGrip(g) {
+  g.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    ev.preventDefault(); ev.stopPropagation(); panelExpanded = false;
+    setInspectorWidth(inspW + (ev.key === 'ArrowLeft' ? 40 : -40), true);
+    fitHome(0);
+  });
   g.addEventListener('pointerdown', (ev) => {
-    ev.preventDefault();
+    ev.preventDefault(); panelExpanded = false;
     g.setPointerCapture(ev.pointerId);
-    const x0 = ev.clientX, w0 = inspW;
-    const move = (e) => setInspectorWidth(w0 + (x0 - e.clientX));
-    const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); setInspectorWidth(inspW, true); };
+    const x0 = ev.clientX, w0 = $('#panel').getBoundingClientRect().width;
+    const move = (e) => { setInspectorWidth(w0 + x0 - e.clientX); fitHome(0); };
+    const up = () => {
+      g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
+      setInspectorWidth(inspW, true); fitHome(0);
+    };
     g.addEventListener('pointermove', move);
-    g.addEventListener('pointerup', up);
+    g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
   });
 }
 
-// ---------------------------------------------------------------- marks: legend, key, guide
-// One table drives three lists: the legend (always in the stage), the key overlay (k) and
-// the guide's "In the picture". Each entry is a mark the renderer draws, a swatch drawn like
-// the mark, its words (short in the legend, long in the key and the guide) and its section.
-// drawnMarks() reads the scene and says which entries are on screen now, so the three lists
-// show exactly what the picture draws, and the same thing. Entries in the 'reading' section
-// are conventions, not marks: only the key shows them, by view.
+// ---------------------------------------------------------------- visual key
+// The key and guide share the marks currently visible in the scene.
 // a swatch drawn in a 34 x 14 box, shown at cw x ch CSS px (the side panel's markers are smaller)
 function keySwatch(draw, w = 34, h = 14, cw = w, ch = h) {
   const c = document.createElement('canvas');
@@ -3134,11 +3265,6 @@ const rgbaHex = (n, a) => `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},
 function swatches() {
   const S = STYLE[viewCtx()], BT = BOX_TIER[S.box];
   const face = hex(C.modFront);
-  const hatch = (g, x, y, w, h, colour = K.hatchKey, pitch = 3, dir = 1, lw = 1) => {
-    g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip(); g.strokeStyle = colour; g.lineWidth = lw;
-    for (let k = -h; k < w + h; k += pitch) { g.beginPath(); if (dir > 0) { g.moveTo(x + k, y + h); g.lineTo(x + k + h, y); } else { g.moveTo(x + k, y); g.lineTo(x + k + h, y + h); } g.stroke(); }
-    g.restore();
-  };
   const row = (extra, edge = TIER.link) => (g) => { g.fillStyle = face; g.fillRect(3, 2, 28, 10); g.strokeStyle = hex(edge); g.lineWidth = 1; g.strokeRect(3.5, 2.5, 27, 9); if (extra) extra(g); };
   const text = (s, weight = 400, size = 8, color = T.text) => (g) => { g.fillStyle = color; g.font = `${weight} ${size}px ${FONT}`; g.fillText(s, 6, 10); };
   const tick = (key, x = 26, y = 1) => (g) => { g.fillStyle = hex(C[key]); g.fillRect(x, y, 6, 6); };
@@ -3194,7 +3320,6 @@ function swatches() {
     g.strokeStyle = stroke; g.lineWidth = 1.1;
     for (const [y0, y1, x] of [[2.6, 7.1, 12], [2.6, 11.6, 8], [7.1, 11.6, 12]]) { g.beginPath(); g.moveTo(16, y0); g.lineTo(x, y0); g.lineTo(x, y1); g.lineTo(16, y1); g.stroke(); }
   };
-  const marginArcs = (stroke) => (g) => { g.strokeStyle = hex(TIER.strong); g.lineWidth = 1; g.strokeRect(14, 1, 18, 4.5); g.strokeRect(14, 8.5, 18, 4.5); g.strokeStyle = stroke; g.lineWidth = 1.3; g.beginPath(); g.moveTo(14, 3); g.bezierCurveTo(7, 3, 7, 11, 14, 11); g.stroke(); };
   const flow = (g) => {
     g.fillStyle = hex(C.boxLine); g.strokeStyle = T.muted; g.lineWidth = 1.2;
     g.fillRect(2, 2, 7, 4); g.fillRect(15, 2, 7, 4); g.fillRect(24, 9.5, 8, 4);
@@ -3208,25 +3333,23 @@ function swatches() {
   };
   const plate = (g) => { g.fillStyle = hex(C.plate); g.strokeStyle = hex(TIER.link); g.lineWidth = 1; g.beginPath(); g.moveTo(3, 12); g.lineTo(28, 12); g.lineTo(32, 5); g.lineTo(7, 5); g.closePath(); g.fill(); g.stroke(); g.fillStyle = T.text; g.fillRect(6, 9.5, 9, 1.4); };
   const curveGround = (stroke) => (g) => { g.strokeStyle = stroke; g.lineWidth = 1.2; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(3, 10); g.bezierCurveTo(12, 4, 20, 4, 27, 8); g.stroke(); g.setLineDash([]); g.fillStyle = stroke; g.beginPath(); g.moveTo(31, 10); g.lineTo(25, 5.5); g.lineTo(24, 10.5); g.closePath(); g.fill(); };
-  // the signal swatches look like the marks: a filled hatched row with its tick, a tinted
-  // row with its dotted underline and tick, a dotted chord, a blue bar on a row
+  // the signal swatches match the solid fills, row bars and dotted clone chords
   const deadRow = (g) => {
     g.fillStyle = face; g.fillRect(1, 2, 24, 10);
     g.fillStyle = rgbaHex(C.deadFill, C.deadFillA); g.fillRect(1, 2, 24, 10);
-    hatch(g, 1, 2, 24, 10, hex(C.dead), 3.2, -1, 1.2);
-    g.strokeStyle = hex(C.dead); g.lineWidth = 1.2; g.setLineDash([2.5, 1.5]); g.strokeRect(1.5, 2.5, 23, 9); g.setLineDash([]);
+    g.strokeStyle = hex(C.dead); g.lineWidth = 1.2; g.strokeRect(1.5, 2.5, 23, 9); g.setLineDash([]);
     tick('dead', 27, 4)(g);
   };
   const cloneRow = (g) => {
     g.fillStyle = face; g.fillRect(1, 2, 24, 10);
     g.fillStyle = rgbaHex(C.cloneFill, C.cloneFillA); g.fillRect(1, 2, 24, 10);
     g.strokeStyle = hex(TIER.link); g.lineWidth = 1; g.strokeRect(1.5, 2.5, 23, 9);
-    g.strokeStyle = hex(C.clone); g.lineWidth = 2; g.setLineDash([1, 1.6]); g.beginPath(); g.moveTo(3, 10); g.lineTo(23, 10); g.stroke(); g.setLineDash([]);
+    g.strokeStyle = hex(C.clone); g.lineWidth = 2; g.beginPath(); g.moveTo(3, 10); g.lineTo(23, 10); g.stroke(); g.setLineDash([]);
     tick('clone', 27, 4)(g);
   };
   const cloneChord = (g) => { g.strokeStyle = hex(C.clone); g.lineWidth = 2; g.lineCap = 'round'; g.setLineDash([0.1, 3]); g.beginPath(); g.moveTo(3, 12); g.bezierCurveTo(6, 0, 28, 0, 31, 12); g.stroke(); g.setLineDash([]); g.lineCap = 'butt'; };
   const lbRow = row((g) => { g.fillStyle = hex(C.lb); g.fillRect(4, 3, 3, 8); });
-  const block = (g) => { g.fillStyle = hex(C.boxFront); g.fillRect(3, 1, 17, 12); g.fillStyle = hex(C.boxHead); g.fillRect(3, 1, 17, 3); g.strokeStyle = hex(TIER.strong); g.lineWidth = 1; g.strokeRect(3.5, 1.5, 16, 11); hatch(g, 4, 8.5, 15, 1.6); g.fillStyle = T.muted; g.font = `400 6px ${FONT}`; g.fillText('◆', 23, 6); g.fillText('◇', 23, 12); };
+  const block = (g) => { g.fillStyle = hex(C.boxFront); g.fillRect(3, 1, 17, 12); g.fillStyle = hex(C.boxHead); g.fillRect(3, 1, 17, 3); g.strokeStyle = hex(TIER.strong); g.lineWidth = 1; g.strokeRect(3.5, 1.5, 16, 11); g.fillStyle = hex(C.boxHead); g.fillRect(4, 8.5, 15, 1.6); g.fillStyle = T.muted; g.font = `400 6px ${FONT}`; g.fillText('◆', 23, 6); g.fillText('◇', 23, 12); };
   const fields = (g) => { g.strokeStyle = hex(C.write); g.lineWidth = 1; g.beginPath(); g.moveTo(3, 4); g.bezierCurveTo(10, 4, 12, 10, 19, 10); g.stroke(); g.fillStyle = T.text; g.font = `400 8px ${FONT}`; g.fillText('◆ ◇', 20, 11); };
   const port = (stroke) => (g) => { g.strokeStyle = stroke; g.lineWidth = 1.4; g.beginPath(); g.moveTo(2, 4); g.bezierCurveTo(10, 4, 12, 9, 20, 9); g.stroke(); g.fillStyle = hex(C.boxFront); g.fillRect(20, 3, 12, 10); g.strokeStyle = hex(TIER.strong); g.lineWidth = 1; g.strokeRect(20.5, 3.5, 11, 9); g.fillStyle = stroke; g.fillRect(19, 7.5, 3, 3); };
   const header = (stroke) => (g) => { g.strokeStyle = stroke; g.lineWidth = 1.4; g.beginPath(); g.moveTo(2, 2); g.bezierCurveTo(10, 2, 14, 2, 18, 5); g.stroke(); g.fillStyle = hex(C.boxFront); g.fillRect(14, 5, 18, 8); g.strokeStyle = hex(TIER.strong); g.lineWidth = 1; g.strokeRect(14.5, 5.5, 17, 7); g.fillStyle = stroke; g.fillRect(15, 4, 16, 1.6); };
@@ -3234,6 +3357,7 @@ function swatches() {
   const pill = (g) => { g.fillStyle = K.pill; g.strokeStyle = K.pillLineStrong; g.lineWidth = 1; g.beginPath(); g.roundRect(3, 2, 28, 10, 2.5); g.fill(); g.stroke(); g.fillStyle = T.lit; g.font = `700 7px ${FONT}`; g.fillText('name', 7, 9.5); };
   const litSlot = row((g) => { g.strokeStyle = hex(C.lit); g.lineWidth = 1.6; g.strokeRect(4, 3, 26, 8); });
   return {
+    call: taper(hex(TIER.link), 2.4, 'arc'),
     load_bearing: lbRow, dead: deadRow, clone: cloneRow, clone_chord: cloneChord, import_cycle: curveGround(hex(C.red)),
     outline: (g) => { g.strokeStyle = hex(TIER.link); g.globalAlpha = 0.6; g.lineWidth = 1; g.strokeRect(7.5, 1.5, 19, 11.5); g.globalAlpha = 1; },
     stub_pill: (g) => { g.fillStyle = face; g.fillRect(1, 3, 7, 9); g.strokeStyle = hex(TIER.link); g.lineWidth = 1; g.strokeRect(1.5, 3.5, 6, 8); g.strokeStyle = T.muted; g.beginPath(); g.moveTo(8, 7.5); g.lineTo(12, 7.5); g.stroke(); g.fillStyle = K.pill; g.strokeStyle = K.pillLine; g.beginPath(); g.roundRect(12, 3, 21, 9, 2.5); g.fill(); g.stroke(); g.fillStyle = T.text; g.font = `700 6px ${FONT}`; g.fillText('→ fn', 14, 9.5); },
@@ -3243,40 +3367,41 @@ function swatches() {
     lit: litSlot, trace: taper(hex(C.lit), 3, 'flat'), pulse: (g) => { taper(hex(C.lit), 2, 'flat')(g); glow(g); }, evidence: pill,
     plate, box: mbox(), row: row(text('fn')), exported: row(text('fn', 700)), class_row: row((g) => { g.fillStyle = hex(C.classRow); g.fillRect(6, 4, 22, 6); g.strokeStyle = hex(TIER.edge); g.strokeRect(6.5, 4.5, 21, 5); }),
     more: row((g) => { g.strokeStyle = hex(TIER.link); g.lineWidth = 1; for (const y of [5.5, 7.5, 9.5]) { g.beginPath(); g.moveTo(5, y); g.lineTo(29, y); g.stroke(); } }),
-    tail: row((g) => hatch(g, 4, 3, 26, 8)), wrapper: row(text('fn', 400, 6)),
+    tail: row((g) => { g.fillStyle = hex(C.boxHead); g.fillRect(4, 3, 26, 8); }), wrapper: row(text('fn', 400, 6)),
     card: card(hex(S.card[0])), class_block: card(hex(S.block[0]), 1.2), class_open: block, fields,
     plate_ribbon: taper(hex(S.ribbon === TIER.rule ? TIER.link : S.ribbon), 5, 'arc'),
     link_track: taper(hex(S.link), 2.4, 'metro'), link_row: taper(hex(S.link), 2.4, 'row', twoPlates), link_arc: taper(hex(S.link), 2.4, 'arc'),
     margin_arc: lanes(hex(S.call)), curve: curves(hex(S.call)), into_class: port(hex(S.call)), constructs: header(hex(S.call)), intra: loop(hex(S.call)), stub,
-    import: curveGround(hex(viewCtx() === 'plan' ? S.imp : TIER.edge)),
+    import: curveGround(hex(TIER.link)),
     flow, ports, click: mbox(TIER.link, (g) => { g.strokeStyle = T.lit; g.lineWidth = 1.2; g.strokeRect(7.5, 1.5, 19, 3.2); }),
   };
 }
 // [id, section, short words (legend), long words (key, guide), reading views (o n p m)]
 const MARK_TABLE = [
-  ['load_bearing', 'signals', 'load-bearing', 'load-bearing: blue bar on the row'],
-  ['dead', 'signals', 'dead', 'dead: yellow hatched row, dashed call'],
-  ['clone', 'signals', 'clone', 'clone: purple row, box tick'],
+  ['load_bearing', 'signals', 'Load-bearing', 'blue bar: widely called function or one that calls many others'],
+  ['dead', 'signals', 'Possibly unused', 'amber fill: unreachable from known entry points; possibly unused'],
+  ['clone', 'signals', 'Structural clone', 'purple fill / tick: matching code structure elsewhere'],
   ['clone_chord', 'signals', 'clone pair', 'clone pair: dotted purple chord'],
-  ['import_cycle', 'signals', 'import cycle', 'import cycle: red dashed line'],
+  ['import_cycle', 'signals', 'Import cycle', 'import cycle: red dashed line'],
   ['lit', 'attention', 'lit', 'lit: named, selected or hovered'],
   ['trace', 'attention', 'traced path', 'traced path: the heaviest lit line'],
   ['pulse', 'attention', 'pulses', 'pulses: caller → callee, 3 runs'],
   ['evidence', 'attention', 'name pill', 'pill: a lit name too small to print'],
   ['call_pill', 'attention', 'hovered call', 'hovered call: caller → callee pill'],
-  ['plate', 'units', 'package', 'package: a plate, name at the front'],
+  ['plate', 'units', 'package', 'package: one enclosing box and labeled base'],
   ['box', 'units', 'module', 'module: a box, rows fold inside'],
   ['outline', 'units', 'outside scope', 'module outside the scope: outline only'],
   ['row', 'units', 'public name', 'public name: a row on its box'],
   ['exported', 'units', 'exported (bold)', 'bold name: exported (__all__)'],
   ['class_row', 'units', 'class', 'class: an inset row'],
   ['more', 'units', 'more names', 'more public names: hairlines'],
-  ['tail', 'units', 'internals', 'internals: the hatched tail'],
+  ['tail', 'units', 'internals', 'internals: muted band at the bottom'],
   ['wrapper', 'units', 'wrapper', 'wrapper: small type'],
   ['card', 'units', 'function', 'unfolded module: cards by depth'],
   ['class_block', 'units', 'class block', 'class: a block of public rows'],
   ['class_open', 'units', 'class opened', 'class opened: private rows below'],
   ['fields', 'units', 'state', 'state: ◆ owned, ◇ injected'],
+  ['call', 'calls', 'Function call', 'solid line: resolved function call'],
   ['plate_ribbon', 'calls', 'package pair', 'package to package: one ribbon'],
   ['link_track', 'calls', 'module pair', 'call in the package: track above'],
   ['link_row', 'calls', 'along the row', 'call along the row: side track'],
@@ -3305,8 +3430,6 @@ function onScreenPts(pts) {
   for (const p of pts) { const P = scr(p[0], p[1], p[2]); if (P[2] <= 1 && P[0] >= x0 && P[0] <= x1 && P[1] >= y0 && P[1] <= y1) return true; }
   return false;
 }
-const strandPts = (o) => { const out = []; for (let i = 0; i < o.n; i += Math.max(1, Math.floor(o.n / 12))) out.push([o.pts[i * 3], o.pts[i * 3 + 1], o.pts[i * 3 + 2]]); out.push([o.pts[o.n * 3 - 3], o.pts[o.n * 3 - 2], o.pts[o.n * 3 - 1]]); return out; };
-
 function drawnMarks(thr = 0.1) {
   const on = new Set();
   const vis = (pts) => onScreenPts(pts);
@@ -3317,7 +3440,7 @@ function drawnMarks(thr = 0.1) {
     if (o.a < thr) continue;
     const b = o.b, z = o.p.z + b.d;
     if (!vis([[b.x, 0, z], [b.x + b.w, 0, z], [b.x, -o.h, z], [b.x + b.w, -o.h, z]])) continue;
-    // a box outside a scope is a silhouette: its outline only, no rows (strata-lines)
+    // A box outside a scope is a silhouette: its outline only, no rows
     if (o.sil) { on.add('outline'); continue; }
     on.add('box');
     if (o.edges.material.color.getHex() === C.lit) on.add('lit');
@@ -3399,7 +3522,7 @@ function drawnMarks(thr = 0.1) {
   if (labelLog.some((l) => l.kind === 'callout')) on.add('evidence');
   if (labelLog.some((l) => l.kind === 'pill')) on.add('call_pill');
   if (labelLog.some((l) => l.kind === 'stubpill')) on.add('stub_pill');
-  // the inspector's source: its linked sites and its not-drawn markers (strata-inspector)
+  // The inspector's source: its linked sites and its not-drawn markers.
   if (codeEl && !$('#inspector').classList.contains('hidden')) {
     if (codeEl.querySelector('.site.e')) on.add('site_linked');
     if (codeEl.querySelector('.site.x')) on.add('site_other');
@@ -3417,46 +3540,19 @@ const MARK_ROW = (e, words, sw, cls = 'k', size = [34, 14]) => {
   return r;
 };
 let marksOn = new Set(), marksKey = null;
-const LEGEND_KEY = 'atlas.legend';
-let legendOpen = (() => { try { return localStorage.getItem(LEGEND_KEY) !== 'closed'; } catch (e) { return true; } })();
-// the legend: the marks on screen, short words, signals first; collapses to a pill
-function renderLegend(set = marksOn) {
-  const el = $('#legend'), sw = swatches();
-  const list = MARK_TABLE.filter((e) => e[1] !== 'reading' && set.has(e[0]));
-  el.innerHTML = '';
-  el.classList.toggle('pill', !legendOpen);
-  el.classList.toggle('hidden', !$('#key').classList.contains('hidden'));
-  const h = document.createElement('div');
-  h.className = 'lh';
-  h.innerHTML = `<span>Legend</span><span class="mini"></span><span class="sp"></span><button title="${legendOpen ? 'Collapse the legend' : 'Show the legend'} (shift+k)">${legendOpen ? '–' : '+'}</button>`;
-  const mini = h.querySelector('.mini');
-  for (const e of list.filter((e) => e[1] === 'signals')) mini.appendChild(keySwatch(sw[e[0]], 34, 14, 26, 10.7));
-  el.appendChild(h);
-  const grid = document.createElement('div');
-  grid.className = 'lb-grid';
-  // at most three columns, filled top to bottom: the legend stays in the corner of the picture
-  const rows = Math.ceil(list.length / Math.min(3, Math.ceil(list.length / 5)));
-  grid.style.gridTemplateRows = `repeat(${Math.max(1, rows)}, auto)`;
-  grid.style.gridAutoFlow = 'column';
-  grid.style.gridTemplateColumns = 'none';
-  for (const e of list) grid.appendChild(MARK_ROW(e, e[2], sw, 'k', [30, 12.4]));
-  el.appendChild(grid);
-  h.querySelector('button').addEventListener('click', (ev) => { ev.stopPropagation(); setLegend(!legendOpen); });
-  el.onclick = legendOpen ? null : () => setLegend(true);
-}
-function setLegend(open) {
-  legendOpen = open;
-  try { localStorage.setItem(LEGEND_KEY, open ? 'open' : 'closed'); } catch (e) { /* storage off */ }
-  renderLegend();
-  dirty = true; schedule();
-}
 // the key overlay (k): the same marks in long words, by section, plus the view's conventions
 function renderKey(set = marksOn) {
   const el = $('#key'), sw = swatches();
   const tagOf = { overview: 'o', plan: 'n', package: 'p', module: 'm' }[viewCtx()];
-  const list = MARK_TABLE.filter((e) => (e[1] === 'reading' ? e[4].includes(tagOf) : set.has(e[0])));
+  const list = MARK_TABLE.filter((e) => (e[1] === 'reading' ? e[4].includes(tagOf) : e[1] === 'signals' || e[0] === 'call' || e[0] === 'import' || set.has(e[0])));
   const secs = [...new Set(list.map((e) => e[1]))];
-  el.innerHTML = '';
+  el.innerHTML = '<header class="legend-title"><strong>Map legend</strong><button type="button" aria-label="Close legend">×</button></header>';
+  el.querySelector('button').addEventListener('click', () => toggleKey(false));
+  const compact = $('#legendMarks');
+  compact.replaceChildren();
+  for (const [id, words] of [['load_bearing', 'Load-bearing'], ['clone', 'Structural clone'], ['dead', 'Possibly unused'], ['import_cycle', 'Import cycle'], ['call', 'Solid: function call'], ['import', 'Dashed: import'], ['clone_chord', 'Dotted: clone pair'], ['tail', 'Muted band: internals']]) {
+    compact.appendChild(MARK_ROW(MARK_TABLE.find((e) => e[0] === id), words, sw));
+  }
   for (const sec of secs) {
     const colEl = document.createElement('div');
     const h = document.createElement('div');
@@ -3468,7 +3564,7 @@ function renderKey(set = marksOn) {
 }
 // The guide's "In the picture": of the marks on screen, every colour and highlight (signals,
 // attention) and the marks the step is about (Python's step.marks), in long words. It is a
-// subset of the legend's list, so the two cannot disagree, and every colour on screen is in both.
+// subset of the key, retaining the current step's signals and highlights.
 const STEP_ALIAS = { hub: 'load_bearing' };
 function guideMarkSet(set = marksOn) {
   const G = guideStep();
@@ -3484,13 +3580,13 @@ function renderGuideMarks(set = marksOn) {
   box.innerHTML = '';
   for (const e of MARK_TABLE) if (e[1] !== 'reading' && show.has(e[0])) box.appendChild(MARK_ROW(e, e[3], sw));
 }
-// recompute after the picture settles; rebuild the three lists only when the set changes
+// Rebuild the key and guide after the picture settles and the marks change.
 function updateMarks(force = false) {
   const set = drawnMarks();
   const key = [...set].sort().join(',') + '|' + THEME + '|' + viewCtx();
   if (!force && key === marksKey) return false;
   marksKey = key; marksOn = set;
-  renderLegend(set); renderKey(set); renderGuideMarks(set);
+  renderKey(set); renderGuideMarks(set);
   return true;
 }
 
@@ -3501,6 +3597,7 @@ function writeHash() {
   const p = new URLSearchParams();
   if (state.guide !== null) {
     p.set('guide', STEPS[state.guide].id);
+    if (state.proj !== 'ortho') p.set('proj', state.proj);
     history.replaceState(null, '', '#' + p.toString());
     return;
   }
@@ -3509,7 +3606,7 @@ function writeHash() {
   const extra = [...state.open].filter((m) => m !== focusModule());
   if (extra.length) p.set('unfold', extra.join(','));
   if (state.expanded.size) p.set('open', [...state.expanded].join(','));
-  if (state.view !== 'axo') p.set('view', state.view);
+  p.set('view', state.view);
   if (state.proj !== 'ortho') p.set('proj', state.proj);
   p.set('at', STEPS[state.resume].id);
   history.replaceState(null, '', '#' + p.toString());
@@ -3518,6 +3615,7 @@ function writeHash() {
 // exploration (#map: the whole map).
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get('proj') === 'persp') state.proj = 'persp';
   if (!location.hash.slice(1) || p.has('guide')) return { guide: STEP_INDEX.get(p.get('guide')) ?? 0 };
   state.resume = STEP_INDEX.get(p.get('at')) ?? 0;
   const sp = (v) => {
@@ -3538,22 +3636,20 @@ function readHash() {
     o.group.position.z = CL.get(c).z + CL.get(c).expanded.lift;
     rerouteClass(c);
   }
-  state.view = p.get('view') || (state.scope ? 'elev' : 'axo');
-  if (p.get('proj') === 'persp') state.proj = 'persp';
+  state.view = p.get('view') || 'axo';
   return { guide: null };
 }
 
 // ---------------------------------------------------------------- loop
 function resize() {
   W = viewW(); H = viewH();
+  setInspectorWidth(inspW);
   renderer.setSize(W, H, false);
   labelCanvas.width = W * DPR; labelCanvas.height = H * DPR;
   applyViewOffset();
   for (const m of lineMats) m.resolution.set(W, H);
   dirty = true; schedule();
-  if (lastFit === 'view') goView(state.view, 0);
-  else if (lastFit === 'sel') fitSelection(0);
-  else if (lastFit === 'guide' && state.guide !== null) flyTo(stepGoal(STEPS[state.guide]), 0);
+  if (ready) fitHome(0);
 }
 addEventListener('resize', () => { resize(); });
 
@@ -3562,41 +3658,40 @@ function frame(now) {
   const flying = stepFlight(now);
   const fading = stepAlphas(now);
   const pulsing = stepPulses(now / 1000);
-  const moved = controls.update();
+  const moved = flying ? false : controls.update();
   if (flying || fading || pulsing || moved) schedule();
   if (!(dirty || flying || fading || pulsing || moved)) { scheduleMarks(); return; }
   if (!flying && (moved || dirty)) updateLod();
   const dist = camera.position.distanceTo(controls.target);
   scene.fog.near = dist * 0.9; scene.fog.far = dist * 2.6;
+  const ppu = pxPerUnit();
+  for (const mat of lineMats) if (mat.dashed) mat.dashScale = ppu;
   renderer.render(scene, camera);
   drawLabels();
   dirty = false;
-  // the legend, the key and the guide's list follow the picture once it settles: the scene read
+  // The key and guide follow the picture once it settles: the scene read
   // (drawnMarks, 2 to 3 ms) runs once, 120 ms after the last drawn frame, never inside a frame
   if (!flying && !fading) scheduleMarks();
 }
-let legendRect = '', marksTimer = 0;
+let marksTimer = 0;
 function scheduleMarks() {
   clearTimeout(marksTimer);
   marksTimer = setTimeout(() => {
-    if (!updateMarks()) return;
-    const r = $('#legend').getBoundingClientRect(), k = `${r.width}|${r.height}`;
-    if (k !== legendRect) { legendRect = k; dirty = true; schedule(); }
+    updateMarks();
   }, 120);
 }
 
 // ---------------------------------------------------------------- theme
 // A theme change swaps the tokens and re-colours everything in place: registered materials
-// and build-time lines, the hatches, fog, pulses, box tiers, the class blocks (rebuilt), and
+// and build-time lines, fog, pulses, box tiers, the class blocks (rebuilt), and
 // every line applyEmphasis paints. Nothing moves; the camera stays.
 function setTheme(name, { persist = true } = {}) {
   if (!THEMES[name]) return;
   loadTokens(name);
   document.documentElement.dataset.theme = name;
-  if (persist) { try { localStorage.setItem(THEME_KEY, name); } catch (e) { /* storage off */ } }
+  if (persist) { try { localStorage.setItem(THEME_KEY, name); } catch { /* storage off */ } }
   for (const [m, key] of TOKMATS) m.color.set(C[key]);
   for (const [line, key, n] of TOKLINES) { line.userData.paintKey = null; paintLine(line, C[key], null, n); }
-  for (const h of HATCHES) { drawHatch(h.c, h.kind); h.t.needsUpdate = true; }
   scene.fog.color.set(C.bg);
   themePulses();
   for (const o of modObjs.values()) {
@@ -3622,17 +3717,23 @@ function setTheme(name, { persist = true } = {}) {
 }
 resize();
 const boot = readHash();
+panelMode = boot.guide !== null ? 'guide' : state.inspect ? 'source' : 'browse';
+browsePackage = scopePackage(); browseModule = focusModule();
+showPanel(panelMode, false);
 renderTree(); renderCrumbs();
 $('#themeBtn .tn').textContent = THEME;
-renderLegend();
+
 for (const o of modObjs.values()) modAlpha(o);
 if (boot.guide !== null) guideGo(boot.guide, { ms: 0 });
 else { renderGuide(); applyEmphasis(); goView(state.view, 0); }
-document.querySelectorAll('#views [data-view]').forEach((b) => b.addEventListener('click', () => { if (state.guide === null) goView(b.dataset.view); }));
+document.querySelectorAll('#views [data-view]').forEach((b) => b.addEventListener('click', () => { leaveGuide(); goView(b.dataset.view); }));
 $('#mapBtn').addEventListener('click', () => toMap());
 $('#keyBtn').addEventListener('click', () => toggleKey());
+$('#legendMore').addEventListener('click', () => toggleKey(true));
 $('#helpBtn').addEventListener('click', () => toggleHelp());
 $('#projBtn').addEventListener('click', () => toggleProjection());
+ready = true;
+wirePanel();
 renderHelp();
 $('#projBtn').classList.toggle('on', state.proj === 'ortho');
 $('#projBtn').textContent = state.proj === 'ortho' ? 'Orthographic' : 'Perspective';
@@ -3640,7 +3741,7 @@ $('#themeBtn').addEventListener('click', () => setTheme(THEME === 'dark' ? 'ligh
 // without a stored choice the page follows the system setting as it changes
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', (e) => {
   let stored = null;
-  try { stored = localStorage.getItem(THEME_KEY); } catch (err) { /* storage off */ }
+  try { stored = localStorage.getItem(THEME_KEY); } catch { /* storage off */ }
   if (!stored && !new URLSearchParams(location.search).get('theme')) setTheme(e.matches ? 'light' : 'dark', { persist: false });
 });
 $('#status').classList.add('hidden');

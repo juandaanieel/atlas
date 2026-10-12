@@ -46,7 +46,7 @@ class ProjectRegistry:
             "id": str(uuid.uuid4()),
             "name": _project_name(name, root.name),
             "path": str(root),
-            "added_at": _utc_now(),
+            "added_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "last_opened_at": None,
         }
         document["projects"].append(project)
@@ -101,7 +101,7 @@ class ProjectRegistry:
         document = self._document()
         for project in document["projects"]:
             if project["id"] == project_id:
-                project["last_opened_at"] = _utc_now()
+                project["last_opened_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self._write(document)
                 return
         raise KeyError(project_id)
@@ -195,10 +195,6 @@ class ProjectRegistry:
                 temporary_path.unlink()
 
 
-def default_state_directory() -> Path:
-    return Path.home() / ".atlas" / "dashboard"
-
-
 def resolve_registered_root(path: str | Path) -> Path:
     if not isinstance(path, (str, Path)):
         raise ValueError("Project path must be text")
@@ -231,7 +227,3 @@ def _prepare_state_directory(path: str | Path) -> Path:
         raise NotADirectoryError(f"Dashboard state path is not a directory: {requested}")
     resolved.chmod(0o700)
     return resolved
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

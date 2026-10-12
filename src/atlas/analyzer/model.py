@@ -41,7 +41,7 @@ _LAYER_TOKENS = [
 ]
 
 
-def build_model(files, symbols, calls, imports, package_name, objects, circular_imports, exports):
+def build_model(files, symbols, calls, imports, package_name, objects, circular_imports, exports, references):
     """Assemble the comprehension model from raw analysis facts.
 
     This is the only place graph semantics are decided. Diagrams, the report,
@@ -61,7 +61,19 @@ def build_model(files, symbols, calls, imports, package_name, objects, circular_
 
     out_edges, in_edges, unresolved_out = _call_edges(calls, callable_ids)
     roots = _roots(callables, in_edges)
-    reachable = _reachable_from(roots, out_edges)
+    # A callable value can escape into a callback, alias, or nested closure.
+    # Keep this usage graph separate from measured calls and their fan-in/out.
+    usage_edges = {sid: set(targets) for sid, targets in out_edges.items()}
+    test_files = {f["id"] for f in files if f["is_test"]}
+    for reference in references:
+        source, target = reference["source"], reference["target"]
+        if reference["file_id"] in test_files or target not in callable_ids:
+            continue
+        if source is None:
+            roots.add(target)
+        elif source in callable_ids:
+            usage_edges.setdefault(source, set()).add(target)
+    reachable = _reachable_from(roots, usage_edges)
 
     nodes = _classify_nodes(
         callables, roots, reachable, in_edges, out_edges, unresolved_out, exports
@@ -338,7 +350,7 @@ def _layer_relations(files, imports, calls, by_id):
     for item in imports:
         if item["module"] not in local_modules:
             continue
-        target = _import_target(item, local_modules, resolve_from_base)
+        target = _import_target(item, local_modules)
         if target and target != item["module"]:
             edges[(item["module"], target)] += 1
 
@@ -389,7 +401,7 @@ def _import_pairs(files, symbols, imports, column_modules, circular_imports):
         source = item["module"]
         if source not in local_modules:
             continue
-        imported = _import_target(item, local_modules, resolve_from_base)
+        imported = _import_target(item, local_modules)
         defining = module_of_symbol.get(item["symbol"])
         targets = {imported}
         if defining is not None and defining != imported:
@@ -400,7 +412,7 @@ def _import_pairs(files, symbols, imports, column_modules, circular_imports):
     return [list(pair) for pair in sorted(pairs)]
 
 
-def _import_target(item, local_modules, resolve_from_base):
+def _import_target(item, local_modules):
     if item["kind"] == "import":
         pieces = item["imported_module"].split(".")
         for index in range(len(pieces), 0, -1):

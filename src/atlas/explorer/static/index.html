@@ -26,37 +26,79 @@
   <div class="brand">ATLAS<span class="sep">/</span><span id="pkg">…</span></div>
   <nav id="crumbs"></nav>
   <div id="modes">
-    <button id="mapBtn" title="The whole map (Esc in the guide)">Map</button>
-    <button id="keyBtn" title="Show or hide the key (k)">Key</button>
+    <button id="browseBtn" title="Open the side panel (b)">Panel</button>
+    <button id="keyBtn" title="Colors, line styles and map symbols (k)" aria-expanded="false" aria-controls="key">Legend</button>
     <button id="helpBtn" title="Keys (? or h)">?</button>
     <button id="themeBtn" title="Light or dark theme (t)"><span class="ic">◐</span> <span class="tn">dark</span></button>
   </div>
-  <div id="views">
-    <button data-view="axo" title="Axonometric overview (1)">Axonometric</button>
-    <button data-view="plan" title="Plan: modules and imports from above (2)">Plan</button>
-    <button data-view="elev" title="Elevation: the scope face-on (3)">Elevation</button>
-    <button id="projBtn" title="Orthographic or perspective Elevation (o)">Orthographic</button>
-  </div>
 </header>
 
-<!-- the reading path: one step at a time, the picture shows what the text talks about -->
-<aside id="guide" class="chrome"></aside>
-
-<!-- free exploration: the scope tree (pipelines are reached through the guide, an entry row
-     and the inspector's call sites) -->
-<aside id="side" class="chrome hidden">
-  <div class="h">Scope</div>
-  <div id="tree"></div>
-  <div class="hint">arrows move · + − zoom · Home fit · esc up a level<br>box: scope · header: unfold · row: select and read<br>u unfold · 1 2 3 views · o ortho · k key · t theme · ? keys</div>
+<aside id="panel" class="chrome" aria-label="Explore and inspect">
+  <div class="grip" role="separator" tabindex="0" aria-label="Resize panel" aria-orientation="vertical" title="Drag or use left and right arrows to resize"><i></i></div>
+  <div id="panelNav" role="tablist" aria-label="Workspace tabs">
+    <button id="panelBack" title="Back (Backspace)" aria-label="Back">←</button>
+    <button id="tab-browse" role="tab" aria-controls="browser" data-panel="browse">Browse</button>
+    <button id="tab-guide" role="tab" aria-controls="guide" data-panel="guide">Guide</button>
+    <button id="tab-source" role="tab" aria-controls="inspector" data-panel="source">Source</button>
+    <button id="tab-prompt" role="tab" aria-controls="prompt" data-panel="prompt">Prompt</button>
+    <span class="sp"></span>
+    <button id="expandPanel" title="Expand source panel" aria-label="Expand panel">↔</button>
+    <button id="closePanel" title="Close panel (Esc)" aria-label="Close panel">×</button>
+  </div>
+  <details id="navigation" class="control-box" open>
+    <summary>Navigation <span id="navProgress"></span></summary>
+    <div class="control-body">
+      <div class="tour-controls">
+        <button id="mapBtn" title="The whole map (Esc in the guide)">Map</button>
+        <select id="guideStep" aria-label="Tutorial step"></select>
+        <button id="guidePrev" aria-label="Previous tutorial step" title="Previous tutorial step">←</button>
+        <button id="guideNext" aria-label="Next tutorial step" title="Next tutorial step">→</button>
+      </div>
+    </div>
+  </details>
+  <details id="viewControls" class="control-box" open>
+    <summary>View</summary>
+    <div class="control-body">
+      <div id="views">
+        <button data-view="axo" title="Axonometric overview (1)">Axonometric</button>
+        <button data-view="plan" title="Plan: modules and imports from above (2)">Plan</button>
+        <button data-view="elev" title="Elevation: the scope face-on (3)">Elevation</button>
+        <button id="projBtn" title="Orthographic or perspective projection (o)">Orthographic</button>
+      </div>
+      <nav id="cameraTools" aria-label="Map controls">
+        <button id="fitBtn" title="Fit the current view (Home)">⌖ Fit view</button>
+        <button id="zoomOut" title="Zoom out (-)" aria-label="Zoom out">−</button>
+        <button id="zoomIn" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <span class="tool-divider"></span>
+        <button id="orbitBtn" aria-pressed="true" title="Toggle orbit and pan controls">Orbit</button>
+        <span id="cameraHint">Drag to orbit · right-drag to pan</span>
+      </nav>
+    </div>
+  </details>
+  <section id="browser" role="tabpanel" aria-labelledby="tab-browse" class="hidden">
+    <div class="browse-head"><h2>Explore the code</h2><p id="browseSummary"></p>
+      <input id="symbolSearch" type="search" placeholder="Find a module or symbol…" aria-label="Find a module or symbol" autocomplete="off" spellcheck="false">
+    </div>
+    <div id="tree"></div>
+  </section>
+  <section id="guide" role="tabpanel" aria-labelledby="tab-guide"></section>
+  <section id="inspector" role="tabpanel" aria-labelledby="tab-source" class="hidden"></section>
+  <section id="prompt" class="hidden" role="tabpanel" aria-labelledby="tab-prompt">
+    <div class="prompt-head"><h2>Plan the cleanup</h2><p>Measured findings, selected source evidence, and a focused proposal for your coding agent.</p><span id="promptMeta"></span></div>
+    <textarea id="optimizationPrompt" aria-label="Optimization prompt" readonly spellcheck="false"></textarea>
+    <div class="prompt-footer"><button id="copyPrompt">Copy prompt</button><p id="copyStatus" role="status">Generated locally. Nothing is sent to an AI service.</p></div>
+  </section>
+  <details id="legend">
+    <summary>Colors &amp; lines</summary>
+    <div id="legendMarks"></div>
+    <div class="legend-note">Faded marks provide context outside the current focus.</div>
+    <button id="legendMore" type="button">Full map legend ↗</button>
+  </details>
 </aside>
 
-<aside id="inspector" class="chrome hidden"></aside>
-
-<section id="key" class="chrome hidden"></section>
+<section id="key" class="chrome hidden" aria-label="Map legend"></section>
 
 <section id="help" class="chrome hidden"></section>
-<!-- the legend: the marks on screen right now, each with a swatch that looks like it -->
-<section id="legend" class="chrome"></section>
 
 <nav id="rail" class="chrome"></nav>
 

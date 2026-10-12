@@ -8,12 +8,10 @@ from pathlib import Path
 
 from atlas.analyzer.discovery import resolve_analysis_root
 from atlas.analyzer.payload import analyze_path
-from atlas.analyzer.snapshot import AnalysisSnapshot
 from atlas.output import checked_output_path, ensure_child_directory
 from atlas.vault import write_vault
 
 
-ATLAS_MARKER = ".atlas-owned"
 GENERATED_MARKER = ".atlas-generated"
 STAGING_MARKER = ".atlas-dashboard-staging"
 
@@ -38,7 +36,6 @@ def refresh_project(
     try:
         payload_path = staging_dir / "atlas.json"
         payload_path.write_text(snapshot.to_json(indent=2) + "\n", encoding="utf-8")
-        AnalysisSnapshot.from_json(payload_path.read_text(encoding="utf-8"))
 
         staged_vault = staging_dir / "vault"
         write_vault(root_path, snapshot, out=staged_vault)
@@ -63,12 +60,6 @@ def _atlas_directory(root: Path) -> Path:
     atlas_dir.mkdir(exist_ok=True)
     if not atlas_dir.is_dir():
         raise NotADirectoryError(f"Atlas output is not a directory: {atlas_dir}")
-    marker = checked_output_path(atlas_dir, ATLAS_MARKER)
-    if not marker.exists():
-        marker.write_text(
-            "Atlas owns generated files in this directory, not project source.\n",
-            encoding="utf-8",
-        )
     _recover_interrupted_vault_swap(atlas_dir)
     return atlas_dir
 

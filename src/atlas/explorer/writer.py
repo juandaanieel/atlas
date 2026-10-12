@@ -12,7 +12,7 @@ from atlas.story import build_story, validate_story
 
 
 STATIC_DIR = Path(__file__).parent / "static"
-ASSETS = ("styles.css", "app.bundle.js", "app.bundle.js.LEGAL.txt", "THREE-LICENSE.txt")
+ASSETS = ("styles.css", "app.bundle.js", "app.bundle.js.LEGAL.txt", "THREE-LICENSE.txt", "MARKDOWN-LICENSES.txt")
 
 
 def write_explorer(
@@ -34,18 +34,20 @@ def write_explorer(
 
 def render_explorer(snapshot: AnalysisSnapshot, story: dict | None = None) -> str:
     """Use the same offline renderer for static exports and the local dashboard."""
+    facts = snapshot.to_dict()
     if story is None:
-        story = build_story(snapshot)
-    validate_story(story, snapshot)
-    document = build_view(snapshot.to_dict(), story)
+        story = build_story(facts)
+    else:
+        validate_story(story, facts)
+    document = build_view(facts, story)
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for marker, filename in (("STYLES", "styles.css"), ("APP", "app.bundle.js")):
         version = hashlib.sha256((STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
         template = template.replace(f"__ATLAS_{marker}_VERSION__", version)
-    return template.replace("__ATLAS_VIEW__", _script_safe_json(document))
+    return template.replace("__ATLAS_VIEW__", script_safe_json(document))
 
 
-def _script_safe_json(document: dict) -> str:
+def script_safe_json(document: dict) -> str:
     """Escape HTML-significant characters before placing JSON in a script."""
     return (
         json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False)
