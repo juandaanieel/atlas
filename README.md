@@ -89,6 +89,6 @@ npm run build
 Node is needed only to change the browser code. Commit the rebuilt bundle with
 its source so Python installations can generate exports immediately.
 
-Licensed under [GPL-3.0](LICENSE). Bundled Three.js uses the
+Licensed under [BSD-3-Clause](LICENSE). Bundled Three.js uses the
 [MIT license](src/atlas/explorer/static/THREE-LICENSE.txt). Markdown rendering
 [licenses](src/atlas/explorer/static/MARKDOWN-LICENSES.txt) are included in every export.

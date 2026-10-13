@@ -1,6 +1,7 @@
 {
   "name": "atlas-explorer",
   "private": true,
+  "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {
     "build": "esbuild src/atlas/explorer/static/src/app.js --bundle --format=iife --minify --legal-comments=linked --outfile=src/atlas/explorer/static/app.bundle.js",
